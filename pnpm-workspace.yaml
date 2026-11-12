@@ -1,0 +1,18 @@
+# pnpm project settings
+ignoreScripts: true
+ignorePnpmfile: true
+sideEffectsCache: false
+verifyStoreIntegrity: true
+minimumReleaseAge: 1440
+blockExoticSubdeps: true
+trustPolicy: no-downgrade
+engineStrict: true
+storeDir: .local/cache/pnpm/store
+
+overrides:
+  undici@8.10.2: 8.12.2
+  minimatch@10.2.6: 11.0.1
+
+patchedDependencies:
+  '@earendil-works/pi-coding-agent@1.4.0': agent/patches/pi-coding-agent-1.4.0.patch
+  '@earendil-works/pi-tui@1.4.0': agent/patches/pi-tui-1.4.0.patch

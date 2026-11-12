@@ -1,0 +1,47 @@
+diff --git a/dist/modes/interactive/interactive-mode.d.ts b/dist/modes/interactive/interactive-mode.d.ts
+index 40df44a..1592891 100644
+--- a/dist/modes/interactive/interactive-mode.d.ts
++++ b/dist/modes/interactive/interactive-mode.d.ts
+@@ -38,6 +38,10 @@ export interface InteractiveModeOptions {
+     initialThemeSetting?: string;
+     /** Terminal implementation. Defaults to the current process terminal. */
+     terminal?: Terminal;
++    /** Embedded hosts can omit coding-tool discovery and automatic downloads. Defaults to true. */
++    manageTools?: boolean;
++    /** Print the standalone CLI resume command on exit. Defaults to true. */
++    showResumeHint?: boolean;
+ }
+ export declare class InteractiveMode {
+     private runtimeHost;
+diff --git a/dist/modes/interactive/interactive-mode.js b/dist/modes/interactive/interactive-mode.js
+index 5303aad..3568d4c 100644
+--- a/dist/modes/interactive/interactive-mode.js
++++ b/dist/modes/interactive/interactive-mode.js
+@@ -774,11 +774,13 @@ export class InteractiveMode {
+         // Ensure fd and rg are available after mounting the TUI (downloads if missing, adds to PATH via getBinDir)
+         // so slow downloads do not make startup appear frozen.
+         // Both are needed: fd for autocomplete, rg for grep tool and bash commands.
+-        const [fdPath] = await Promise.all([
+-            ensureTool("fd", (status) => this.showManagedToolStatus(status)),
+-            ensureTool("rg", (status) => this.showManagedToolStatus(status)),
+-        ]);
+-        this.fdPath = fdPath;
++        if (this.options.manageTools !== false) {
++            const [fdPath] = await Promise.all([
++                ensureTool("fd", (status) => this.showManagedToolStatus(status)),
++                ensureTool("rg", (status) => this.showManagedToolStatus(status)),
++            ]);
++            this.fdPath = fdPath;
++        }
+         // Enable the remaining input handlers only after managed-tool setup completes.
+         this.setupKeyHandlers();
+         this.setupEditorSubmitHandler();
+@@ -3472,7 +3474,7 @@ export class InteractiveMode {
+         this.stop();
+         await this.runtimeHost.dispose();
+         const resumeCommand = formatResumeCommand(this.sessionManager);
+-        if (resumeCommand) {
++        if (resumeCommand && this.options.showResumeHint !== false) {
+             process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
+         }
+         process.exit(0);

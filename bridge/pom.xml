@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.just</groupId>
+    <artifactId>justsimple-parent</artifactId>
+    <version>0.1.0</version>
+  </parent>
+  <artifactId>justsimple-agent-bridge</artifactId>
+  <name>JustSimple Agent Bridge</name>
+  <dependencies>
+    <dependency><groupId>io.just</groupId><artifactId>justsimple</artifactId><version>${project.version}</version></dependency>
+  </dependencies>
+  <build>
+    <resources>
+      <resource><directory>..</directory><includes><include>LICENSE</include></includes><targetPath>META-INF/JustSimple-Agent</targetPath></resource>
+    </resources>
+  </build>
+</project>

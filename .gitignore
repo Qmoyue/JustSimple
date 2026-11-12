@@ -1,0 +1,78 @@
+# Private .local/work artifacts, evaluation data, caches and runtime state.
+.local/
+
+# Explicitly requested root task guide; development content stays private.
+/TODO.md
+
+# Legacy work locations stay private; check:repo flags them at the repository root.
+/benchmark/
+/work/
+/scratch/
+/tmp/
+/temp/
+/NOTES.md
+
+# Build output and local dependency state.
+target/
+node_modules/
+dist/
+.pnpm-store/
+package-lock.json
+npm-shrinkwrap.json
+yarn.lock
+.pnp.*
+.pnpmfile.*
+/.m2/
+*.class
+*.jar
+*.war
+*.ear
+dependency-reduced-pom.xml
+
+# Agent, editor, and IDE state.
+/.agents/
+/.codex/
+/.claude/
+.idea/
+.vscode/
+.settings/
+.history/
+.classpath
+.project
+.factorypath
+*.iml
+*.ipr
+*.iws
+
+# Local settings and credentials; example configuration stays public.
+/.aws/
+.env
+.env.*
+!.env.example
+!.env.sample
+/local.properties
+.npmrc.local
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime diagnostics, caches, and temporary files.
+*.log
+*.hprof
+*.jfr
+hs_err_pid*
+replay_pid*
+.cache/
+__pycache__/
+*.py[cod]
+/.venv/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+Desktop.ini

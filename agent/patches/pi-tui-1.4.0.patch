@@ -1,0 +1,35 @@
+diff --git a/dist/tui-alt-screen.js b/dist/tui-alt-screen.js
+--- a/dist/tui-alt-screen.js
++++ b/dist/tui-alt-screen.js
+@@ -2,7 +2,7 @@
+ import { AltScreenFlashContainer } from "./components/alt-screen-flash.js";
+ import { ScrollView } from "./components/scroll-view.js";
+ import { getKeybindings } from "./keybindings.js";
+-import { isKeyRelease } from "./keys.js";
++import { isKeyRelease, matchesKey } from "./keys.js";
+ import { getLayoutBoxesAt, getScrollbarGeometry, getScrollViewBox, getScrollViewsAt, renderLayoutFrame, } from "./layout.js";
+ import { getLayoutNode } from "./layout-node.js";
+ import { deleteAllKittyImages, deleteAllKittyPlacements, deleteKittyImage, getCapabilities, getKittyImagePlacement, getKittyImagePlacementRows, isImageLine, setCapabilities, } from "./terminal-image.js";
+@@ -532,6 +532,11 @@
+         }
+         if (this.isMouseSequence(data))
+             return { consume: true };
++        if (!this.copyOnSelect && this.hasActiveSelection() && matchesKey(data, "ctrl+c")) {
++            if (!isKeyRelease(data))
++                void this.copyActiveSelectionToClipboard();
++            return { consume: true };
++        }
+         const keybindings = getKeybindings();
+         const isRelease = isKeyRelease(data);
+         if (keybindings.matches(data, "tui.altScreen.search")) {
+@@ -705,6 +710,10 @@
+         this.selectionDragged = false;
+     }
+     handleMouseEvent(raw) {
++        if (!this.copyOnSelect && raw.button === 2 && !raw.release && this.hasActiveSelection()) {
++            void this.copyActiveSelectionToClipboard();
++            return;
++        }
+         const isMotion = (raw.button & 32) !== 0;
+         const type = raw.release
+             ? "release"
