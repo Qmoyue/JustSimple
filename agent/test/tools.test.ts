@@ -241,6 +241,9 @@ test("complete scan retains evidence and connection checks use result-scoped sup
   await call("read_result", { resultRef: grounded.resultRef, action: "release" });
   const limited = reference(await call("scan_target", { entries: [entry], sinks: [sink], budgets: { steps: 1 }, knowledge: "none" }));
   assert.equal(limited.summary.execution, "TRUNCATED");
+  const reasons = (await page(limited.resultRef, ["limitations"], { limit: 1 })).data;
+  assert.ok(Array.isArray(reasons) && typeof reasons[0] === "string");
+  assert.equal(limited.summary.firstLimitation, reasons[0]);
   await call("read_result", { resultRef: limited.resultRef, action: "release" });
   await assert.rejects(page(limited.resultRef, []), /released/);
   await assert.rejects(call("check_connection", { resultRef: `${tools.bridge.inputId}/foreign`, relations: [0] }), /unreleased/);

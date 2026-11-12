@@ -233,6 +233,7 @@ final class ScannerTools implements AutoCloseable {
             JsonObject summary=new JsonObject();summary.addProperty("execution",result.execution().name());summary.addProperty("outcome",result.outcome().name());
             summary.addProperty("entries",result.entries().size());summary.addProperty("relations",result.relations().size());summary.addProperty("findings",result.findings().size());summary.addProperty("breakpoints",result.breakpoints().size());summary.addProperty("demandFrontier",result.demandFrontier().size());
             summary.add("statistics",ToolJson.GSON.toJsonTree(result.statistics()));summary.add("budgets",ToolJson.GSON.toJsonTree(budget));summary.addProperty("limitations",result.limitations().size());summary.addProperty("missingClasses",result.missingClasses().size());
+            if(!result.limitations().isEmpty())summary.addProperty("firstLimitation",brief(result.limitations().get(0)));
             return new Reply(identity,ref,"scan_target",elapsed(start),summary);
         } finally {if(!retained)scanInput.close();}
     }

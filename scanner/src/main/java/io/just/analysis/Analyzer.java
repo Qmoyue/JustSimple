@@ -306,12 +306,12 @@ public final class Analyzer {
     }
 
     private ScanResult result(Mode mode, List<Entry> entries, Optional<StaticData> data, long started) {
+        int pendingWork=queue.size()+deferred.size();
         String workFrontier=evidence.size()>=limits.relations()?"relation budget: "+limits.relations():"work item budget: "+limits.steps();
-        if (!queue.isEmpty()) limit(workFrontier+"; pending="+queue.size());
         for(Work work:queue)if(work instanceof Backward query)frontiers.put(query.key,List.of(new DemandFrontier(query.key.context(),query.key.use(),query.key.origin(),query.key.path(),DemandState.BUDGET,List.of(),"backward query pending at "+workFrontier)));
         for (State state : states) {
             long waiting = state.units.stream().filter(u -> u.progress instanceof Waiting).count();
-            if (waiting > 0 && queue.isEmpty())
+            if (waiting > 0 && pendingWork==0)
                 limit("unresolved cyclic/local dependencies in " + state.key.target() + ": " + waiting + " instructions");
         }
         List<Finding> findings = evidence.findings(states.stream().map(state -> new EvidenceGraph.Context(state.key.parent(),state.parentRelation,state.entry,List.copyOf(state.required))).toList());
@@ -337,9 +337,12 @@ public final class Analyzer {
         limitations.addAll(program.limitations());
         limitations.addAll(heap.limitations());
         limitations.addAll(evidence.limitations());
-        return new ScanResult(mode, limitations.isEmpty() ? Execution.FINISHED : Execution.TRUNCATED,
+        List<String> reported=new ArrayList<>(limitations.size()+1);
+        if(pendingWork>0)reported.add(workFrontier+"; pending="+pendingWork);
+        reported.addAll(limitations);
+        return new ScanResult(mode, reported.isEmpty() ? Execution.FINISHED : Execution.TRUNCATED,
                 findings.isEmpty() ? Outcome.NO_FINDINGS : Outcome.FINDINGS, input, data.map(StaticData::summary), limits, program.instructionLimit(), entries, ranking.hints(),
-                relations, findings, List.copyOf(limitations), program.missingClasses(),
+                relations, findings, reported, program.missingClasses(),
                 new Statistics((System.nanoTime() - started) / 1_000_000, states.size(), steps,
                         heap.cells(), evidence.size(), findings.size(),backwardQueries,demandGuidance,summaryApplications,refinementWork,combinationReuses,rankingWork,states.stream().filter(state -> state.ranking.rank()!=SearchRanking.Rank.NONE).count(),modelReuses,effectReuses),needs,demandFrontier,List.copyOf(breakpoints));
     }
@@ -399,7 +402,6 @@ public final class Analyzer {
             }
             progress(Stage.ANALYSIS);
         }
-        if (!deferred.isEmpty()) limit("deferred callback budget: "+deferred.size()+" registrations pending");
     }
 
     private Optional<Local> model(Unit unit,Invocation invocation) {
@@ -498,8 +500,11 @@ public final class Analyzer {
     private void initialize(State state) {
         Unit previous = null;
         for (Action action : state.facts.actions()) {
-            if (unitsCreated>=limits.steps() || state.key.parent()<0 && state.units.size()>=rootInstructionBudget) {
-                Gap gap = new Gap(GapKind.BUDGET, action.site(), "scheduled instruction budget: " + limits.steps());
+            boolean scanLimit=unitsCreated>=limits.steps();
+            if (scanLimit || state.key.parent()<0 && state.units.size()>=rootInstructionBudget) {
+                String detail=scanLimit?"scheduled instruction budget: "+limits.steps()
+                        :"entry instruction budget: "+rootInstructionBudget+" at "+state.key.target();
+                Gap gap = new Gap(GapKind.BUDGET, action.site(), detail);
                 state.required.add(gap);
                 limit(gap.detail());
                 state.returned = Value.of(new Truncated(gap.detail())).requiring(List.of(gap));

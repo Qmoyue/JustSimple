@@ -220,7 +220,12 @@ export function scannerCommands(settings: ScannerSettings, sessionManager: Sessi
           screen.scan!.state = "写入报告"; refresh(ctx);
           await scanner.bridge.call("export_scan", { resultRef: result.resultRef, output }, signal);
           screen.scan!.state = `${result.summary.execution === "TRUNCATED" ? "预算或范围受限" : "已完成"} · ${result.summary.outcome === "FINDINGS" ? "存在候选" : "未发现候选"}`;
-          screen.scan!.summary = `候选 ${result.summary.findings} · 关系 ${result.summary.relations} · 断点 ${result.summary.breakpoints}\nreport.json · report.md · input-requirements.json`;
+          const reason = result.summary.firstLimitation;
+          screen.scan!.summary = [
+            `候选 ${result.summary.findings} · 关系 ${result.summary.relations} · 断点 ${result.summary.breakpoints}`,
+            ...(typeof reason === "string" ? [`限制：${reason}`] : []),
+            "report.json · report.md · input-requirements.json",
+          ].join("\n");
           sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: `/scan-only ${scan.options.input}` }], timestamp: Date.now() });
           pi.appendEntry("scanner-target", scan); setup = scan;
           pi.sendMessage({ customType: "scanner-result", display: false, content: `${screen.scan!.state}\n输出 ${output}`, details: result }, { triggerTurn: false });

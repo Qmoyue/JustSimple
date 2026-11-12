@@ -44,6 +44,43 @@ class CliProgressTest {
         assertEquals(1,json.getAsJsonArray("findings").size());
     }
 
+    @Test void cliNamesTheEntryLimitWhenTheGlobalWorkBudgetWasNotSpent()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("BudgetFixture.java","""
+                public class BudgetFixture {
+                  public static int entry() { int a = 1, b = 2, c = 3; return a + b + c; }
+                }
+                """));
+        Path output=temp.resolve("limited");ByteArrayOutputStream errors=new ByteArrayOutputStream();
+        int code=Main.run(new String[]{"--input",classes.toString(),"--jdk-home",System.getProperty("java.home"),
+                "--output",output.toString(),"--mode","component","--entry","BudgetFixture#entry()I",
+                "--no-guidance","--max-steps","4"},
+                new PrintStream(OutputStream.nullOutputStream(),true,StandardCharsets.UTF_8),new PrintStream(errors,true,StandardCharsets.UTF_8));
+        assertEquals(3,code,errors.toString(StandardCharsets.UTF_8));
+        JsonObject report=JsonParser.parseString(Files.readString(output.resolve("report.json"))).getAsJsonObject();
+        assertTrue(report.getAsJsonObject("statistics").get("workItems").getAsLong()<4);
+        String reason=report.getAsJsonArray("limitations").get(0).getAsString();
+        assertTrue(reason.startsWith("entry instruction budget: 2 "),reason);
+        assertTrue(reason.contains("BudgetFixture#entry"),reason);
+        assertTrue(errors.toString(StandardCharsets.UTF_8).contains("[limit] "+reason));
+    }
+
+    @Test void queueStopRemainsVisibleAfterManyLocalLimits()throws Exception {
+        StringBuilder source=new StringBuilder("public class LimitFixture { static void mark(int ignored) {}\n");
+        for(int i=0;i<101;i++)source.append("public static void big").append(i).append("() {")
+                .append("mark(1);".repeat(24)).append("}\n");
+        source.append("public static void zzEntry() { mark(1); mark(2); }}");
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("LimitFixture.java",source.toString()));
+        Path output=temp.resolve("relation-limit");ByteArrayOutputStream errors=new ByteArrayOutputStream();
+        int code=Main.run(new String[]{"--input",classes.toString(),"--jdk-home",System.getProperty("java.home"),
+                "--output",output.toString(),"--mode","component","--no-guidance","--max-relations","1","--max-method-instructions","40"},
+                new PrintStream(OutputStream.nullOutputStream(),true,StandardCharsets.UTF_8),new PrintStream(errors,true,StandardCharsets.UTF_8));
+        assertEquals(3,code,errors.toString(StandardCharsets.UTF_8));
+        var limits=JsonParser.parseString(Files.readString(output.resolve("report.json"))).getAsJsonObject().getAsJsonArray("limitations");
+        assertTrue(limits.size()>100);
+        assertTrue(limits.get(0).getAsString().startsWith("relation budget: 1; pending="),limits.get(0)::getAsString);
+        assertTrue(limits.get(1).getAsString().startsWith("method instruction budget (40): "),limits.get(1)::getAsString);
+    }
+
     @Test void cliRejectsAnExistingOutputBeforeIndexingInput() throws Exception {
         Path output = Files.createDirectory(temp.resolve("existing"));
         Path marker = Files.writeString(output.resolve("keep.txt"), "keep");

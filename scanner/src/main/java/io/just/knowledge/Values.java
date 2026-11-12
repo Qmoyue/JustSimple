@@ -125,22 +125,41 @@ public final class Values {
             if(value instanceof ExternalValue external)types.add(external.descriptor());
             return new Selection(value,types);
         }
-        public boolean impliedBy(Selection actual) {return equals(actual) || actual.and(this).equals(Optional.of(actual));}
+        public boolean impliedBy(Selection actual) {
+            if(equals(actual))return true;
+            if(!actual.types.containsAll(types))return false;
+            if(range.isPresent()) {
+                IntegralRange needed=range.get(),selected=actual.range.orElse(null);
+                if(selected==null || needed.minimum()>selected.minimum() || needed.maximum()<selected.maximum())return false;
+            }
+            return actual.value.equals(actual.commonValue(this));
+        }
+        private boolean compatible(Selection other) {return equals(other) || commonValue(other)!=null;}
         Optional<Selection> and(Selection other) {
-            if(equals(other))return Optional.of(this);
+            return Optional.ofNullable(merge(other));
+        }
+        private Selection merge(Selection other) {
+            if(equals(other))return this;
+            Atom chosen=commonValue(other);
+            if(chosen==null)return null;
+            Optional<IntegralRange> narrowed=range.isEmpty()?other.range:other.range.isEmpty()?range:range.get().and(other.range.get());
+            if(chosen.equals(value) && types.containsAll(other.types) && narrowed.equals(range))return this;
+            if(chosen.equals(other.value) && other.types.containsAll(types) && narrowed.equals(other.range))return other;
+            Set<String> combined=new LinkedHashSet<>(types);combined.addAll(other.types);
+            return new Selection(chosen,combined,narrowed);
+        }
+        private Atom commonValue(Selection other) {
             Atom chosen=value;
             boolean left=value instanceof Symbolic || value instanceof ExternalValue || value instanceof UnboundValue,right=other.value instanceof Symbolic || other.value instanceof ExternalValue || other.value instanceof UnboundValue;
-            if(!left && !right && !value.equals(other.value))return Optional.empty();
+            if(!left && !right && !value.equals(other.value))return null;
             if(left && !right)chosen=other.value;
             if(value instanceof Symbolic first && first.type().equals("java/lang/Object") && other.value instanceof Symbolic)chosen=other.value;
-            Optional<IntegralRange> narrowed=range.isEmpty()?other.range:other.range.isEmpty()?range:range.get().and(other.range.get());
-            if(range.isPresent() && other.range.isPresent() && narrowed.isEmpty())return Optional.empty();
+            if(range.isEmpty() && other.range.isEmpty())return chosen;
+            long low=Math.max(range.isPresent()?range.get().minimum():Long.MIN_VALUE,other.range.isPresent()?other.range.get().minimum():Long.MIN_VALUE);
+            long high=Math.min(range.isPresent()?range.get().maximum():Long.MAX_VALUE,other.range.isPresent()?other.range.get().maximum():Long.MAX_VALUE);
+            if(low>high)return null;
             OptionalLong literal=IntegralRange.literal(chosen);
-            if(narrowed.isPresent() && literal.isPresent() && (literal.getAsLong()<narrowed.get().minimum() || literal.getAsLong()>narrowed.get().maximum()))return Optional.empty();
-            if(chosen.equals(value) && types.containsAll(other.types) && narrowed.equals(range))return Optional.of(this);
-            if(chosen.equals(other.value) && other.types.containsAll(types) && narrowed.equals(other.range))return Optional.of(other);
-            Set<String> combined=new LinkedHashSet<>(types);combined.addAll(other.types);
-            return Optional.of(new Selection(chosen,combined,narrowed));
+            return literal.isPresent() && (literal.getAsLong()<low || literal.getAsLong()>high)?null:chosen;
         }
     }
     public static final class Path {
@@ -186,14 +205,19 @@ public final class Values {
         /** Same compatibility as and(), without allocating a merged path for a boolean question. */
         public boolean compatible(Path other) {
             if(this==other)return true;
-            Path smaller=choices.size()<=other.choices.size()?this:other,larger=smaller==this?other:this;
-            for(var choice:smaller.choices.entrySet()) {
-                Integer selected=larger.choices.get(choice.getKey());if(selected!=null && !selected.equals(choice.getValue()))return false;
-            }
-            smaller=selections.size()<=other.selections.size()?this:other;larger=smaller==this?other:this;
+            if(!compatibleChoices(other))return false;
+            Path smaller=selections.size()<=other.selections.size()?this:other,larger=smaller==this?other:this;
             for(var selection:smaller.selections.entrySet()) {
                 Selection selected=larger.selections.get(selection.getKey());
-                if(selected!=null && selected.and(selection.getValue()).isEmpty())return false;
+                if(selected!=null && !selected.compatible(selection.getValue()))return false;
+            }
+            return true;
+        }
+        private boolean compatibleChoices(Path other) {
+            Path smaller=choices.size()<=other.choices.size()?this:other,larger=smaller==this?other:this;
+            for(var choice:smaller.choices.entrySet()) {
+                Integer selected=larger.choices.get(choice.getKey());
+                if(selected!=null && !selected.equals(choice.getValue()))return false;
             }
             return true;
         }
@@ -201,6 +225,7 @@ public final class Values {
             if(this==other || contains(other))return Optional.of(this);
             if(other.contains(this))return Optional.of(other);
             if(!selections.equals(other.selections)) {
+                if(!compatibleChoices(other))return Optional.empty();
                 Map<InputLocation,Selection> combined=new LinkedHashMap<>(selections);
                 for(var selection:other.selections.entrySet()) {
                     Selection old=combined.putIfAbsent(selection.getKey(),selection.getValue());
@@ -210,10 +235,7 @@ public final class Values {
                     }
                 }
                 Map<ChoiceKey,Integer> merged=new LinkedHashMap<>(choices);
-                for(var choice:other.choices.entrySet()) {
-                    Integer old=merged.putIfAbsent(choice.getKey(),choice.getValue());
-                    if(old!=null && !old.equals(choice.getValue()))return Optional.empty();
-                }
+                merged.putAll(other.choices);
                 return Optional.of(new Path(merged,combined));
             }
             if(this==other || other.choices.isEmpty())return Optional.of(this);
@@ -237,7 +259,7 @@ public final class Values {
             for(var choice:other.choices.entrySet())if(!Objects.equals(choices.get(choice.getKey()),choice.getValue()))return false;
             for(var item:other.selections.entrySet()) {
                 Selection own=selections.get(item.getKey());
-                if(own==null || own.and(item.getValue()).filter(own::equals).isEmpty())return false;
+                if(own==null || !item.getValue().impliedBy(own))return false;
             }
             return true;
         }
@@ -302,17 +324,24 @@ public final class Values {
         }
         public Value requiring(List<Gap> gaps) {
             if (gaps.isEmpty()) return this;
-            Set<Bound> result = new LinkedHashSet<>();
-            boolean changed=false;
+            Set<Bound> result=null;
             for (Bound bound : alternatives) {
-                if (bound.gaps().equals(gaps)) {result.add(bound);continue;}
-                Set<Gap> all = new LinkedHashSet<>(bound.gaps());
+                if(bound.gaps().equals(gaps) || bound.gaps().containsAll(gaps)) {
+                    if(result!=null)result.add(bound);
+                    continue;
+                }
+                if(result==null) {
+                    result=new LinkedHashSet<>();
+                    for(Bound previous:alternatives) {
+                        if(previous==bound)break;
+                        result.add(previous);
+                    }
+                }
+                Set<Gap> all=new LinkedHashSet<>(bound.gaps());
                 all.addAll(gaps);
-                if (all.size()==bound.gaps().size()) result.add(bound);
-                else {changed=true;result.add(new Bound(bound.atom(), bound.path(), List.copyOf(all), bound.dependencies()));}
+                result.add(new Bound(bound.atom(),bound.path(),List.copyOf(all),bound.dependencies()));
             }
-            if (!changed) return this;
-            return new Value(result);
+            return result==null?this:new Value(result);
         }
         public Value tracing(Collection<Integer> dependencies) {
             if (dependencies.isEmpty()) return this;

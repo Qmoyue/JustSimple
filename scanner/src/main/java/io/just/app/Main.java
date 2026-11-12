@@ -56,7 +56,11 @@ public final class Main {
             Reports.write(result, output);
             out.println(result.execution() + " " + result.outcome() + ": " + result.findings().size() + " findings, "
                     + result.relations().size() + " relations; " + output);
-            return result.execution() == ScanResult.Execution.TRUNCATED ? 3 : 0;
+            if(result.execution()==ScanResult.Execution.TRUNCATED) {
+                err.println("[limit] "+result.limitations().get(0));
+                return 3;
+            }
+            return 0;
         } catch (IOException | Inputs.Failure | Program.Failure failure) {
             err.println("FAILED: " + failure.getMessage());
             failure.printStackTrace(err);

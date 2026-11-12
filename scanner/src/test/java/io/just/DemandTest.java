@@ -113,7 +113,7 @@ class DemandTest {
         assertEquals(Execution.TRUNCATED,one.execution());assertFalse(one.findings().isEmpty());
 
         assertTrue(one.statistics().workItems()<=small.steps());
-        assertTrue(one.limitations().stream().anyMatch(reason -> reason.contains("scheduled instruction budget") || reason.contains("work budget")));
+        assertTrue(one.limitations().stream().anyMatch(reason -> reason.startsWith("entry instruction budget: 7 at WorkBudget#run")),one.limitations()::toString);
     }
 
     @Test void staticInitializerAndFiniteBuilderRecoverLookupWithoutFacts() throws IOException {

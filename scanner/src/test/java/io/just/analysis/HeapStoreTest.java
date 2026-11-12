@@ -70,6 +70,28 @@ class HeapStoreTest {
             assertTrue(heap.limitations().isEmpty(),"mutually exclusive writes are irrelevant to this bounded read");
         }
     }
+
+    @Test void crossingTheCoveringWriteThresholdKeepsBothExclusiveBranches()throws Exception {
+        Path classes=io.just.BytecodeFixtures.compile(temp,8,Map.of("HeapFixture.java","public class HeapFixture {}"));
+        try(Inputs inputs=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(inputs,20_000);
+            HeapStore heap=new HeapStore(program,new Conditions(program,new io.just.knowledge.Mechanisms(program)),8);
+            heap.context(0,-1,-1,-1);
+            ObjectValue object=new ObjectValue(1,"HeapFixture",true,"object");
+            Slot slot=new Content();Site site=new Site(new MethodId("HeapFixture","read","()V"),65,1,"fixture");
+            var path=io.just.knowledge.Values.Path.EMPTY;
+            BranchKey branch=new BranchKey(0,0);
+            Value left=Value.of(new Literal("left"),path.with(branch,1).orElseThrow()).tracing(Set.of(1));
+            Value right=Value.of(new Literal("right"),path.with(branch,2).orElseThrow());
+            for(int i=1;i<=62;i++)heap.write(object,slot,new ExecutionPoint(0,i),left,site);
+            var use=new HeapStore.Use(new ExecutionPoint(0,65),site,path,List.of(),false);
+            for(int i=63;i<=64;i++) {
+                Value latest=right.tracing(Set.of(i));
+                heap.write(object,slot,new ExecutionPoint(0,i),latest,site);
+                assertEquals(left.merge(latest),heap.read(object,slot,use).value(),"writes: "+i);
+            }
+        }
+    }
     @Test void elementSummariesRespectOverwriteTimePathsAndRequestIdentity() throws Exception {
         java.nio.file.Path classes=io.just.BytecodeFixtures.compile(temp,8,Map.of("HeapFixture.java","public class HeapFixture {}"));
         try(Inputs inputs=Inputs.open(classes,List.of(),java.nio.file.Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {

@@ -92,11 +92,16 @@ final class Conditions {
     }
     boolean implied(Path requirement,Path actual) {
         if(requirement==actual || requirement.equals(Path.EMPTY))return true;
-        return requirement.choices().entrySet().stream().allMatch(c -> Objects.equals(actual.choices().get(c.getKey()),c.getValue()) || gaps(c.getKey(),actual).isEmpty())
-                && requirement.selections().entrySet().stream().allMatch(required -> {
-                    Selection selected=actual.selections().get(required.getKey());
-                    return selected!=null && required.getValue().impliedBy(selected);
-                });
+        for(var choice:requirement.choices().entrySet()) {
+            Integer selected=actual.choices().get(choice.getKey());
+            // A settled choice can be omitted, but an explicit different successor is a contradiction.
+            if(selected!=null ? !selected.equals(choice.getValue()) : !gaps(choice.getKey(),actual).isEmpty())return false;
+        }
+        for(var required:requirement.selections().entrySet()) {
+            Selection selected=actual.selections().get(required.getKey());
+            if(selected==null || !required.getValue().impliedBy(selected))return false;
+        }
+        return true;
     }
     Paths paths(Facts facts,Map<Integer,Decision> branches) {
         Set<Integer> possible=reachable(facts,branches,false,-1),ready=reachable(facts,branches,true,-1);

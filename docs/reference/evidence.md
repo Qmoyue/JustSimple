@@ -4,7 +4,7 @@
 
 Scanner 从同一次扫描写出三份文件。打开 `report.md` 可以阅读发现和依据，`report.json` 保存完整的机器证据，`input-requirements.json` 列出仍需补充的输入。取得可核对的值后，按[静态数据格式](static-data.md)另写清单。
 
-JSON 的 `schemaVersion` 为 `4`。`execution` 表示分析完成或截断，`outcome` 表示本次是否有发现。阅读候选时，同时查看缺失类、分析限制和需要补充的条件。
+JSON 的 `schemaVersion` 为 `4`。`execution` 表示分析完成或截断，`outcome` 表示本次是否有发现。截断时，CLI 和终端界面会显示首条原因，完整列表见报告的 `limitations`。阅读候选时，同时查看缺失类、分析限制和需要补充的条件。
 
 `findings` 保留发现与所选依据，`relations` 记录调用和数据关系，`demandFrontier` 与 `breakpoints` 指向仍待核对的位置。同一关系可以有多组依据（`supports`），每一组都需要 `dependencies` 列出的关系。`proof` 记录发现使用的关系和支持编号。
 

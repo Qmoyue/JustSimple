@@ -172,6 +172,7 @@ public final class Program {
     private final Set<String> missing = new LinkedHashSet<>();
     private final Set<String> queryLimits = new LinkedHashSet<>();
     private final Map<String,QueryIssue> unavailable=new HashMap<>();
+    private static final int SCAN_INSTRUCTION_LIMIT=500_000;
     private long analyzedInstructions;
     private record MemberSignature(String name,String descriptor) {}
     private record Syntax(Map<MemberSignature,Map<MethodId,List<Site>>> callers,Map<MemberSignature,Map<FieldId,List<Site>>> writers,
@@ -818,9 +819,11 @@ public final class Program {
         Parsed parsed = parsed(id.owner(),id.loader()).orElseThrow();
         MethodNode node = code(id);
         if (!method.hasBody()) return new Facts(method, List.of(), List.of(), Map.of(), List.of(new Limitation(CoverageCause.UNSUPPORTED, "native or abstract method body")));
-        if (node.instructions.size() > instructionLimit || analyzedInstructions + node.instructions.size() > 500_000)
-            return new Facts(method, List.of(), List.of(), Map.of(), List.of(new Limitation(CoverageCause.BUDGET, "method/per-scan instruction budget: " + node.instructions.size() + "/" + analyzedInstructions)));
-        analyzedInstructions += node.instructions.size();
+        int count=node.instructions.size();
+        String limit=count>instructionLimit?"method instruction budget ("+instructionLimit+"): "+count+" instructions"
+                :analyzedInstructions+count>SCAN_INSTRUCTION_LIMIT?"scan instruction budget ("+SCAN_INSTRUCTION_LIMIT+"): "+analyzedInstructions+" used, "+count+" requested":null;
+        if(limit!=null)return new Facts(method,List.of(),List.of(),Map.of(),List.of(new Limitation(CoverageCause.BUDGET,limit)));
+        analyzedInstructions+=count;
         return MethodFlow.analyze(method,node,parsed.data().source());
     }
 
