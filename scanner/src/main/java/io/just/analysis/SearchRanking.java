@@ -65,7 +65,7 @@ final class SearchRanking {
             case DESERIALIZATION,CONTAINER_CALLBACK,REFLECTION,METHOD_HANDLE,DYNAMIC_CALL,HTTP_CALLBACK -> true;default -> false;
         }).isPresent();
         // A callback has its own tuple. It must not be compared with the API's operand positions.
-        Match match=callback?new Match(RelationState.PENDING,1):match(site,tuple,path);
+        Match match=callback?new Match(RelationState.PENDING,1):match(site,shapes,tuple,path,EMPTY);
         if(match.state()==RelationState.REFUTED)return Progress.EMPTY;
         Rank rank=match.state()==RelationState.SUPPORTED?Rank.BOUND:Rank.PARTIAL;
         boolean data=parent.witness().isPresent() && edge.stream().flatMap(relation -> relation.supports().stream()).anyMatch(s -> s.dependencies().contains(parent.witness().orElseThrow()));
@@ -94,18 +94,26 @@ final class SearchRanking {
         return progress.rank();
     }
     Match match(Site site,List<Atom> tuple,Path path) {
-        return match(site,tuple,path,EMPTY);
+        return match(site,at(site),tuple,path,EMPTY);
     }
-    private Match match(Site site,List<Atom> tuple,Path path,Selection selection) {
-        Set<CallShape.Pattern> patterns=at(site);if(patterns.isEmpty())return new Match(RelationState.ABSENT,0);
+    private Match match(Site site,Set<CallShape.Pattern> patterns,List<Atom> tuple,Path path,Selection selection) {
+        if(patterns.isEmpty())return new Match(RelationState.ABSENT,0);
         Match best=new Match(RelationState.REFUTED,0);
+        Atom[] projected=null;
+        var arrays=selection.key().arrays();
         for(CallShape.Pattern pattern:patterns) {
             if(tuple.size()>pattern.operands().size())continue;
             boolean conflict=false,pending=false;int supported=0;
             for(int i=0;i<tuple.size();i++) {
-                Atom original=tuple.get(i),atom=CandidateBindings.project(original,path);
-                for(int j=0;j<i;j++)if(pattern.operands().get(i).value()>=0 && pattern.operands().get(i).value()==pattern.operands().get(j).value()) {
-                    Atom previous=CandidateBindings.project(tuple.get(j),path);
+                Atom original=tuple.get(i);
+                var operand=pattern.operands().get(i);
+                int binding=operand.value();
+                for(int j=0;binding>=0 && j<i;j++) {
+                    if(binding!=pattern.operands().get(j).value())continue;
+                    if(projected==null)projected=new Atom[tuple.size()];
+                    if(projected[i]==null)projected[i]=CandidateBindings.project(original,path);
+                    if(projected[j]==null)projected[j]=CandidateBindings.project(tuple.get(j),path);
+                    Atom atom=projected[i],previous=projected[j];
                     if(!atom.equals(previous)) {
                         Optional<Boolean> different=atom instanceof Literal a && previous instanceof Literal b?Optional.of(!a.equals(b)):
                                 new JvmSemantics(program).branchTaken(new Branch(site,org.objectweb.asm.Opcodes.IF_ACMPNE,List.of(),0),List.of(Value.of(atom),Value.of(previous)));
@@ -113,8 +121,10 @@ final class SearchRanking {
                         else if(different.isEmpty())pending=true;
                     }
                 }
-                if(!ValueBindings.finiteBinding(original) || requestedBinding(original,path) || selection.key().arrays().entrySet().stream().anyMatch(e -> e.getKey().atom().equals(original) && e.getKey().path().compatible(path) && e.getValue().origin()==ArrayOrigin.REQUESTED))pending=true;
-                else if(!pattern.operands().get(i).unknown() && pattern.operands().get(i).steps().stream().noneMatch(s -> s.kind()==CallShape.SourceKind.ABSENT))supported++;
+                if(!ValueBindings.finiteBinding(original) || requestedBinding(original,path)
+                        || !arrays.isEmpty() && arrays.entrySet().stream().anyMatch(e -> e.getKey().atom().equals(original)
+                        && e.getKey().path().compatible(path) && e.getValue().origin()==ArrayOrigin.REQUESTED))pending=true;
+                else if(!operand.unknown() && operand.steps().stream().noneMatch(s -> s.kind()==CallShape.SourceKind.ABSENT))supported++;
             }
             if(conflict)continue;
             MemberMatch member=member(site,tuple,path,selection);if(member.state()==RelationState.REFUTED)continue;
@@ -206,24 +216,38 @@ final class SearchRanking {
     }
     List<Bound> order(Call call,Combinations.Combination prefix,List<Bound> values) {return order(call,prefix,values,EMPTY);}
     List<Bound> order(Call call,Combinations.Combination prefix,List<Bound> values,Selection selection) {
-        if(values.size()<2 || at(call.site()).isEmpty())return values;
+        if(values.size()<2)return values;
+        Set<CallShape.Pattern> patterns=at(call.site());
+        if(patterns.isEmpty())return values;
         record Scored(Bound value,int priority) {}
-        List<Scored> scored=new ArrayList<>();
+        List<Scored> scored=new ArrayList<>(values.size());
+        int prefixSize=prefix.atoms().size();
+        List<Atom> tuple=new ArrayList<>(Math.max(prefixSize+1,selection.operands().size()));
+        tuple.addAll(prefix.atoms());
         for(Bound value:values) {
-            List<Atom> tuple=new ArrayList<>(prefix.atoms());tuple.add(value.atom());Optional<Path> path=prefix.path().and(value.path());
+            Optional<Path> path=prefix.path().and(value.path());
+            if(path.isEmpty()) {
+                scored.add(new Scored(value,0));
+                continue;
+            }
+            tuple.add(value.atom());
             // Only single known suffixes are previewed; there is no Cartesian lookahead.
             while(path.isPresent() && tuple.size()<selection.operands().size()) {
                 Set<Bound> suffix=selection.operands().get(tuple.size()).alternatives();if(suffix.size()!=1)break;
                 Bound next=suffix.iterator().next();path=path.get().and(next.path());tuple.add(next.atom());
             }
-            scored.add(new Scored(value,path.isEmpty()?0:match(call.site(),tuple,path.get(),selection).priority()));
+            scored.add(new Scored(value,path.isEmpty()?0:match(call.site(),patterns,tuple,path.get(),selection).priority()));
+            while(tuple.size()>prefixSize)tuple.remove(tuple.size()-1);
         }
         scored.sort(Comparator.comparingInt(Scored::priority).reversed());
-        return fair(scored.stream().map(Scored::value).toList(),values);
-    }
-    private static <T> List<T> fair(List<T> ranked,List<T> ordinary) {
-        LinkedHashSet<T> result=new LinkedHashSet<>();int plain=0;
-        for(T item:ranked){result.add(item);if(result.size()%4==3){while(plain<ordinary.size() && result.contains(ordinary.get(plain)))plain++;if(plain<ordinary.size())result.add(ordinary.get(plain++));}}
+        Set<Bound> result=new LinkedHashSet<>();
+        int plain=0;
+        for(Scored item:scored) {
+            result.add(item.value());
+            if(result.size()%4!=3)continue;
+            while(plain<values.size() && result.contains(values.get(plain)))plain++;
+            if(plain<values.size())result.add(values.get(plain++));
+        }
         return List.copyOf(result);
     }
     boolean applies(Call call){return !at(call.site()).isEmpty();}

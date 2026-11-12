@@ -42,7 +42,8 @@ final class Combinations {
             Set<Bound> freshBounds=new LinkedHashSet<>();bounds.stream().filter(b -> !previousBounds.contains(new Binding(b.atom(),b.path()))).forEach(freshBounds::add);
             Join column=new Join(old,limit,allowance-consumed);
             Map<Combination,List<Bound>> ordered=new HashMap<>();
-            java.util.function.Function<Combination,List<Bound>> choices=prefix -> ordered.computeIfAbsent(prefix,p -> order.apply(p,List.copyOf(bounds)));
+            List<Bound> ordinary=prefixes.isEmpty()?List.of():List.copyOf(bounds);
+            java.util.function.Function<Combination,List<Bound>> choices=prefix -> ordered.computeIfAbsent(prefix,p -> order.apply(p,ordinary));
             // New objects and paths get a turn before evidence refreshes refill a bounded view.
             Map<Combination,Iterator<Bound>> fresh=new LinkedHashMap<>();for(Combination prefix:freshPrefixes)fresh.put(prefix,choices.apply(prefix).iterator());
             while(!fresh.isEmpty() && !column.stopped) {
