@@ -49,7 +49,7 @@ export function showScreen(ctx: ExtensionContext, preferences: ScannerSettings["
       } else {
         const target = state.target?.path === preferences.target ? state.target : undefined;
         const model = ctx.model?.provider === "unknown" ? undefined : ctx.model;
-        const knowledge = scanDefaults?.knowledge === "none" ? "无知识引导" : scanDefaults?.knowledge === "selected" ? "所选知识" : "知识引导";
+        const knowledge = scanDefaults?.knowledge === "none" ? "无参考知识" : scanDefaults?.knowledge === "selected" ? "所选知识" : "知识引导";
         const budgets = Object.entries(scanDefaults?.budgets ?? {}).map(([key, value]) => `${key}=${value}`).join(" · ") || "扫描器预算";
         const auth = model && ctx.modelRegistry.hasConfiguredAuth(model) ? "已认证" : "/login 认证";
         lines = ["", "Java 静态分析", "",

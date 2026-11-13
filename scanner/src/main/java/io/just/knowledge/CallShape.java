@@ -46,17 +46,20 @@ public final class CallShape {
     }
     public record Requirement(Site site,Pattern pattern) {}
 
-    public static Signature signature(MethodId method) {
-        boolean api=platform(method.owner());
-        return new Signature(api?method.owner():"*",api || method.name().startsWith("<")?method.name():"*",descriptor(method.descriptor()));
+    public static Signature signature(Program program,MethodId method) {
+        boolean api=platform(program,method.owner(),method.loader());
+        return new Signature(api?method.owner():"*",api || method.name().startsWith("<")?method.name():"*",descriptor(program,method.descriptor(),method.loader()));
     }
-    private static boolean platform(String type){return type.startsWith("java/") || type.startsWith("javax/") || type.startsWith("jdk/") || type.startsWith("sun/") || type.startsWith("com/sun/");}
-    private static String descriptor(String descriptor) {
+    private static boolean platform(Program program,String type,int loader){
+        return (type.startsWith("java/") || type.startsWith("javax/") || type.startsWith("jdk/") || type.startsWith("sun/") || type.startsWith("com/sun/"))
+                && program.platformType(type,loader);
+    }
+    private static String descriptor(Program program,String descriptor,int loader) {
         StringBuilder result=new StringBuilder();
         for(int i=0;i<descriptor.length();i++) {
             char at=descriptor.charAt(i);if(at!='L'){result.append(at);continue;}
             int end=descriptor.indexOf(';',i);if(end<0)throw new IllegalArgumentException("invalid descriptor: "+descriptor);
-            String type=descriptor.substring(i+1,end);result.append('L').append(platform(type)?type:"*").append(';');i=end;
+            String type=descriptor.substring(i+1,end);result.append('L').append(platform(program,type,loader)?type:"*").append(';');i=end;
         }
         return result.toString();
     }
@@ -67,7 +70,7 @@ public final class CallShape {
         List<Operand> operands=new ArrayList<>();
         Map<Sources,Integer> values=new LinkedHashMap<>();
         for(Sources source:sources) {
-            Operand shape=source(flow,source,parameters,fields,new HashSet<>(),0);
+            Operand shape=source(program,flow,source,parameters,fields,new HashSet<>(),0,call.site().method().loader());
             Sources producer=transparent(flow,source,new HashSet<>(),0);
             int value=producer.origins().size()==1?values.computeIfAbsent(producer,k -> values.size()):-1;
             operands.add(new Operand(value,shape.parameter(),shape.steps()));
@@ -75,8 +78,8 @@ public final class CallShape {
         List<Destination> uses=new ArrayList<>();
         for(Action action:flow.producers().values()) {
             if(action instanceof Call next) {
-                if(contains(flow,next.receiver(),call.site().instruction(),new HashSet<>(),0))uses.add(new Destination(UseKind.RECEIVER,-1,List.of(signature(next.target()))));
-                for(int i=0;i<next.arguments().size();i++)if(contains(flow,next.arguments().get(i),call.site().instruction(),new HashSet<>(),0))uses.add(new Destination(UseKind.ARGUMENT,i,List.of(signature(next.target()))));
+                if(contains(flow,next.receiver(),call.site().instruction(),new HashSet<>(),0))uses.add(new Destination(UseKind.RECEIVER,-1,List.of(signature(program,next.target()))));
+                for(int i=0;i<next.arguments().size();i++)if(contains(flow,next.arguments().get(i),call.site().instruction(),new HashSet<>(),0))uses.add(new Destination(UseKind.ARGUMENT,i,List.of(signature(program,next.target()))));
             } else if(action instanceof Returned returned && contains(flow,returned.value(),call.site().instruction(),new HashSet<>(),0))uses.add(new Destination(UseKind.RETURNED,-1,List.of()));
             else if(action instanceof WriteField write && contains(flow,write.value(),call.site().instruction(),new HashSet<>(),0)
                     || action instanceof WriteArray array && contains(flow,array.value(),call.site().instruction(),new HashSet<>(),0))uses.add(new Destination(UseKind.STORED,-1,List.of()));
@@ -84,29 +87,29 @@ public final class CallShape {
         }
         Set<GuardKind> guards=new LinkedHashSet<>();program.facts(call.site().method()).guards().getOrDefault(call.site().instruction(),List.of()).forEach(g -> guards.add(g.kind()));
         uses=uses.stream().distinct().sorted(Comparator.comparing((Destination d) -> d.kind().ordinal()).thenComparingInt(Destination::operand).thenComparing(d -> d.call().toString())).toList();
-        return new Pattern(signature(call.target()),call.opcode(),operands,uses,guards);
+        return new Pattern(signature(program,call.target()),call.opcode(),operands,uses,guards);
     }
-    private static Operand source(Flow flow,Sources sources,Map<Integer,Integer> parameters,Map<FieldId,Integer> fields,Set<Integer> seen,int depth) {
+    private static Operand source(Program program,Flow flow,Sources sources,Map<Integer,Integer> parameters,Map<FieldId,Integer> fields,Set<Integer> seen,int depth,int loader) {
         if(sources.origins().isEmpty())return new Operand(-1,List.of(new Step(SourceKind.ABSENT,"",-1,List.of())));
         if(depth>=8 || sources.origins().size()!=1)return unknown();
         Origin origin=sources.origins().iterator().next();
         if(origin instanceof Parameter parameter)return new Operand(parameters.computeIfAbsent(parameter.slot(),k -> parameters.size()),List.of(new Step(SourceKind.PARAMETER,"",-1,List.of())));
         if(!(origin instanceof Producer producer) || !seen.add(producer.instruction()))return unknown();
         Action action=flow.producers().get(producer.instruction());
-        if(action instanceof Cast cast)return source(flow,cast.input(),parameters,fields,seen,depth+1);
-        if(action instanceof Assign assign)return source(flow,assign.input(),parameters,fields,seen,depth+1);
-        if(action instanceof ReadField field)return append(source(flow,field.receiver(),parameters,fields,seen,depth+1),new Step(SourceKind.FIELD,descriptor(field.field().descriptor()),fields.computeIfAbsent(field.field(),k -> fields.size()),List.of()));
-        if(action instanceof ReadArray array)return append(source(flow,array.array(),parameters,fields,seen,depth+1),new Step(SourceKind.ELEMENT,"",index(flow,array.index()),List.of()));
+        if(action instanceof Cast cast)return source(program,flow,cast.input(),parameters,fields,seen,depth+1,loader);
+        if(action instanceof Assign assign)return source(program,flow,assign.input(),parameters,fields,seen,depth+1,loader);
+        if(action instanceof ReadField field)return append(source(program,flow,field.receiver(),parameters,fields,seen,depth+1,loader),new Step(SourceKind.FIELD,descriptor(program,field.field().descriptor(),field.field().loader()),fields.computeIfAbsent(field.field(),k -> fields.size()),List.of()));
+        if(action instanceof ReadArray array)return append(source(program,flow,array.array(),parameters,fields,seen,depth+1,loader),new Step(SourceKind.ELEMENT,"",index(flow,array.index()),List.of()));
         if(action instanceof Call call) {
-            Operand base=call.receiver().origins().isEmpty()?new Operand(-1,List.of()):source(flow,call.receiver(),parameters,fields,seen,depth+1);
-            return append(base,new Step(SourceKind.RETURN,descriptor(call.target().descriptor()),-1,List.of(signature(call.target()))));
+            Operand base=call.receiver().origins().isEmpty()?new Operand(-1,List.of()):source(program,flow,call.receiver(),parameters,fields,seen,depth+1,loader);
+            return append(base,new Step(SourceKind.RETURN,descriptor(program,call.target().descriptor(),call.target().loader()),-1,List.of(signature(program,call.target()))));
         }
         if(action instanceof Constant constant) {
             String type=constant.value() instanceof ClassConstant?"java/lang/Class":constant.value() instanceof LiteralConstant literal && literal.value()!=null?literal.value().getClass().getSimpleName():"null";
             return new Operand(-1,List.of(new Step(SourceKind.CONSTANT,type,-1,List.of())));
         }
-        if(action instanceof Allocate allocate)return new Operand(-1,List.of(new Step(SourceKind.ALLOCATION,descriptor("L"+allocate.type()+";"),-1,List.of())));
-        if(action instanceof NewArray array)return new Operand(-1,List.of(new Step(SourceKind.ALLOCATION,descriptor(array.descriptor()),-1,List.of())));
+        if(action instanceof Allocate allocate)return new Operand(-1,List.of(new Step(SourceKind.ALLOCATION,descriptor(program,"L"+allocate.type()+";",loader),-1,List.of())));
+        if(action instanceof NewArray array)return new Operand(-1,List.of(new Step(SourceKind.ALLOCATION,descriptor(program,array.descriptor(),loader),-1,List.of())));
         return unknown();
     }
     private static int index(Flow flow,Sources sources) {

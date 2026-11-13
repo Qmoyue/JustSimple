@@ -14,7 +14,7 @@ export const scannerUsage = `扫描与审计参数
   --facts <JSON>               提供已知静态输入，不执行目标
   --entry 'owner#name(desc)'    指定精确 JVM 入口，可重复
   --sink 'owner#name(desc)'     指定关注的调用终点，可重复
-  --knowledge all|none|selected  知识引导：首次默认 all；知识不代替程序证据
+  --knowledge all|none|selected  参考知识：首次默认 all；知识不代替程序证据
   --knowledge-id <ID>          仅 selected 使用，至少一个，可重复
   --steps <N>                 传播工作量预算
   --contexts <N> --depth <N>   分析上下文与调用深度预算

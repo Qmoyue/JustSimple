@@ -212,6 +212,7 @@ public final class Program {
         return loader!=0 && classes.containsKey(new ClassId(name,loader))?loader:0;}
     public Optional<Inputs.ClassData> classData(String name){return inputs.find(name);}
     public Optional<Inputs.ClassData> classData(String name,int loader){return scope(name,loader)==0?classData(name):parsed(name,loader).map(Parsed::data);}
+    public boolean platformType(String name,int loader){return scope(name,loader)==0 && inputs.platformType(name);}
     /** Definition is static classfile parsing, never JVM class loading. Identity belongs to this program. */
     public MethodId method(String owner,String name,String descriptor,int loader){return new MethodId(owner,name,descriptor,scope(owner,loader));}
     public static final class DefinitionConflict extends RuntimeException {

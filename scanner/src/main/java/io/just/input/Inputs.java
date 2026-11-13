@@ -43,6 +43,7 @@ public final class Inputs implements AutoCloseable {
     private final Map<String, Selected> classes = new LinkedHashMap<>();
     private final Map<String, ClassData> platformClasses = new HashMap<>();
     private final Map<String, Lookup> reads = new HashMap<>();
+    private final Map<String,Boolean> platformTypes = new LinkedHashMap<>();
     private final List<Platform> platform = new ArrayList<>();
     private final List<Artifact> artifacts = new ArrayList<>();
     private final List<String> limitations = new ArrayList<>();
@@ -262,6 +263,16 @@ public final class Inputs implements AutoCloseable {
     }
 
     public Optional<ClassData> find(String name) { return lookup(name).value(); }
+
+    /** Check class ownership from archive metadata without reading bytes or consuming input budgets. */
+    public boolean platformType(String name) {
+        if(classes.containsKey(name))return false;
+        if(platformClasses.containsKey(name))return true;
+        Boolean known=platformTypes.get(name);if(known!=null)return known;
+        boolean present=platform.stream().anyMatch(source -> source.zip().getEntry(source.prefix()+name+".class")!=null);
+        if(platformTypes.size()>=8192)platformTypes.remove(platformTypes.keySet().iterator().next());
+        platformTypes.put(name,present);return present;
+    }
 
     public Lookup lookup(String name) {
         interrupted();

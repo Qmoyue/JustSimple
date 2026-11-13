@@ -13,6 +13,31 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class CatalogTest {
     @TempDir Path temp;
+    @Test void thirdPartyPlatformLikePackagesRemainRenameableWhileJdkCallsKeepTheirIdentity()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of(
+                "com/sun/vendor/Adapter.java","package com.sun.vendor; public class Adapter { public Object apply(Object value){return value;} }",
+                "example/Renamed.java","package example; public class Renamed { public Object apply(Object value){return value;} }",
+                "Use.java","""
+                    public class Use {
+                      public static Object historical(com.sun.vendor.Adapter target,Object value){return target.apply(value);}
+                      public static Object renamed(example.Renamed target,Object value){return target.apply(value);}
+                      public static String platform(com.sun.net.httpserver.HttpExchange exchange){return exchange.getRequestMethod();}
+                    }
+                    """));
+        try(Inputs inputs=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(inputs,20000);
+            MethodId historical=new MethodId("Use","historical","(Lcom/sun/vendor/Adapter;Ljava/lang/Object;)Ljava/lang/Object;");
+            MethodId renamed=new MethodId("Use","renamed","(Lexample/Renamed;Ljava/lang/Object;)Ljava/lang/Object;");
+            Catalog catalog=Catalog.read(ReferenceFixtures.write(temp.resolve("platform-role.json"),program,historical));
+            assertFalse(catalog.hints(program,Set.of(renamed)).value().orElseThrow().isEmpty(),"a dependency in a platform-like namespace is still a role");
+            MethodId platform=new MethodId("Use","platform","(Lcom/sun/net/httpserver/HttpExchange;)Ljava/lang/String;");
+            var call=program.facts(platform).actions().stream().filter(Program.Call.class::isInstance).map(Program.Call.class::cast).findFirst().orElseThrow();
+            var before=inputs.summary();
+            assertEquals("com/sun/net/httpserver/HttpExchange",CallShape.of(program,call).target().owner());
+            assertEquals(before.bytesRead(),inputs.summary().bytesRead(),"class ownership uses archive metadata, not the scan input budget");
+            assertEquals(before.entriesRead(),inputs.summary().entriesRead());
+        }
+    }
     @Test void packagedReferencesExpandStructuralFactsWithoutRawInstructionsOrEvaluationAnswers()throws Exception {
         Catalog catalog=Catalog.builtin();int relations=0;var json=new com.google.gson.Gson();
         for(Catalog.Entry entry:catalog.entries()) {

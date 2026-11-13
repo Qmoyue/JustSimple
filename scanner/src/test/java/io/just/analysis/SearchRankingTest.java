@@ -18,6 +18,33 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class SearchRankingTest {
     @TempDir Path temp;
+    @Test void unresolvedBytecodeSourcesRemainPendingAndKnownBindingsLeadEqualPriority()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("Sources.java","""
+            public class Sources {
+              Object field;
+              static void pair(Object left,Object right) {}
+              public void known(Object value) { pair(field,value); }
+              public void merged(boolean choice,Object value) { pair(field,choice ? value : new Object()); }
+            }
+            """));
+        try(Inputs input=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(input,20000);
+            MethodId known=new MethodId("Sources","known","(Ljava/lang/Object;)V");
+            MethodId merged=new MethodId("Sources","merged","(ZLjava/lang/Object;)V");
+            Path file=ReferenceFixtures.write(temp.resolve("source.json"),program,known);
+            SearchRanking ranking=new SearchRanking(new Mechanisms(program,Catalog.read(file)),program);ranking.configure(true,List.of());
+            Call first=program.facts(known).actions().stream().filter(Call.class::isInstance).map(Call.class::cast).filter(c -> c.target().name().equals("pair")).findFirst().orElseThrow();
+            Call second=program.facts(merged).actions().stream().filter(Call.class::isInstance).map(Call.class::cast).filter(c -> c.target().name().equals("pair")).findFirst().orElseThrow();
+            Atom left=new ObjectValue(1,"java/lang/Object",true,"left"),right=new ObjectValue(2,"java/lang/Object",true,"right");
+            var path=io.just.knowledge.Values.Path.EMPTY;
+            assertEquals(SearchRanking.RelationState.SUPPORTED,ranking.match(first.site(),List.of(new Literal(null),left,right),path).state());
+            assertEquals(SearchRanking.RelationState.PENDING,ranking.match(second.site(),List.of(new Literal(null),left,right),path).state(),"a finite value does not resolve a merged bytecode source");
+            Bound uncertain=Value.of(new ObjectValue(3,"java/lang/Object",false,"unknown")).alternatives().iterator().next();
+            Bound confirmed=Value.of(right).alternatives().iterator().next();
+            var prefix=new Combinations.Combination(List.of(new Literal(null),left),path,List.of(),Set.of());
+            assertEquals(List.of(confirmed,uncertain),ranking.order(first,prefix,List.of(uncertain,confirmed)),"supported bindings lead equally useful unresolved choices without dropping them");
+        }
+    }
     @Test void equalShapesDoNotConflateSeparateValuesAndPossibleAliasesStayPending()throws Exception {
         Path classes=BytecodeFixtures.compile(temp,17,Map.of("Sources.java","""
             public class Sources {

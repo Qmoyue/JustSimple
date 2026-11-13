@@ -228,7 +228,7 @@ final class ScannerTools implements AutoCloseable {
             Program scanProgram=new Program(scanInput,config.methodInstructions());
             Optional<StaticData> data=config.staticData()==null?Optional.empty():Optional.of(StaticData.read(Path.of(config.staticData())));
             ScanResult result=new Analyzer(scanProgram,new Mechanisms(scanProgram,selected,methods(scanProgram,args,"sinks")),budget,
-                    demandGuidance).scan(mode(args),!selection.equals("none"),methods(scanProgram,args,"entries"),data,progress);
+                    demandGuidance).scan(mode(args),true,methods(scanProgram,args,"entries"),data,progress);
             String ref=results.save(writer -> Reports.json(result,writer));scans.put(ref,new Scan(scanInput,scanProgram,result));retained=true;
             JsonObject summary=new JsonObject();summary.addProperty("execution",result.execution().name());summary.addProperty("outcome",result.outcome().name());
             summary.addProperty("entries",result.entries().size());summary.addProperty("relations",result.relations().size());summary.addProperty("findings",result.findings().size());summary.addProperty("breakpoints",result.breakpoints().size());summary.addProperty("demandFrontier",result.demandFrontier().size());

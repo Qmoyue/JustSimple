@@ -393,7 +393,7 @@ public final class Catalog {
             Query<List<Program.SymbolicCall>> query=program.calls(method);pending.addAll(query.pending());
             Map<Integer,Call> actual=new HashMap<>();
             for(Program.SymbolicCall call:query.value().orElse(List.of())) {
-                List<Shape> candidates=calls.getOrDefault(CallShape.signature(call.target()),List.of());if(candidates.isEmpty())continue;
+                List<Shape> candidates=calls.getOrDefault(CallShape.signature(program,call.target()),List.of());if(candidates.isEmpty())continue;
                 if(actual.isEmpty()) {
                     Facts facts=program.facts(method);facts.actions().stream().filter(Call.class::isInstance).map(Call.class::cast).forEach(action -> actual.put(action.site().instruction(),action));
                     facts.limitations().stream().filter(l -> l.cause()==CoverageCause.BUDGET).forEach(l -> pending.add(new QueryIssue(QueryCause.BUDGET,l.detail()+": "+method)));

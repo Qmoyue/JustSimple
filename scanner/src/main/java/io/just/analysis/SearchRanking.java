@@ -26,6 +26,7 @@ final class SearchRanking {
     private final Mechanisms knowledge;
     private final Program program;
     private final Map<Site,Set<CallShape.Pattern>> requirements=new HashMap<>();
+    private final Set<Site> uncertainSources=new HashSet<>();
     private final Set<MethodId> learned=new HashSet<>();
     private final Set<Hint> hints=new LinkedHashSet<>();
     private final Set<QueryIssue> issues=new LinkedHashSet<>();
@@ -39,6 +40,11 @@ final class SearchRanking {
             Set<CallShape.Pattern> known=requirements.getOrDefault(requirement.site(),Set.of());
             if(!known.contains(requirement.pattern())) {
                 if(associations>=8192){issues.add(new QueryIssue(QueryCause.BUDGET,"ranking source relation frontier (8192)"));continue;}
+                if(!requirements.containsKey(requirement.site())) {
+                    Action action=program.flow(requirement.site().method()).producers().get(requirement.site().instruction());
+                    if(!(action instanceof Call call))throw new IllegalStateException("ranking requirement is not a call: "+requirement.site());
+                    if(CallShape.of(program,call).operands().stream().anyMatch(CallShape.Operand::unknown))uncertainSources.add(requirement.site());
+                }
                 requirements.computeIfAbsent(requirement.site(),k -> new LinkedHashSet<>()).add(requirement.pattern());associations++;
             }
             retained.add(requirement);
@@ -103,7 +109,7 @@ final class SearchRanking {
         var arrays=selection.key().arrays();
         for(CallShape.Pattern pattern:patterns) {
             if(tuple.size()>pattern.operands().size())continue;
-            boolean conflict=false,pending=false;int supported=0;
+            boolean conflict=false,pending=uncertainSources.contains(site) || pattern.operands().stream().anyMatch(CallShape.Operand::unknown);int supported=0;
             for(int i=0;i<tuple.size();i++) {
                 Atom original=tuple.get(i);
                 var operand=pattern.operands().get(i);
@@ -219,7 +225,7 @@ final class SearchRanking {
         if(values.size()<2)return values;
         Set<CallShape.Pattern> patterns=at(call.site());
         if(patterns.isEmpty())return values;
-        record Scored(Bound value,int priority) {}
+        record Scored(Bound value,Match match) {}
         List<Scored> scored=new ArrayList<>(values.size());
         int prefixSize=prefix.atoms().size();
         List<Atom> tuple=new ArrayList<>(Math.max(prefixSize+1,selection.operands().size()));
@@ -227,7 +233,7 @@ final class SearchRanking {
         for(Bound value:values) {
             Optional<Path> path=prefix.path().and(value.path());
             if(path.isEmpty()) {
-                scored.add(new Scored(value,0));
+                scored.add(new Scored(value,new Match(RelationState.REFUTED,0)));
                 continue;
             }
             tuple.add(value.atom());
@@ -236,10 +242,11 @@ final class SearchRanking {
                 Set<Bound> suffix=selection.operands().get(tuple.size()).alternatives();if(suffix.size()!=1)break;
                 Bound next=suffix.iterator().next();path=path.get().and(next.path());tuple.add(next.atom());
             }
-            scored.add(new Scored(value,path.isEmpty()?0:match(call.site(),patterns,tuple,path.get(),selection).priority()));
+            scored.add(new Scored(value,path.isEmpty()?new Match(RelationState.REFUTED,0):match(call.site(),patterns,tuple,path.get(),selection)));
             while(tuple.size()>prefixSize)tuple.remove(tuple.size()-1);
         }
-        scored.sort(Comparator.comparingInt(Scored::priority).reversed());
+        scored.sort(Comparator.comparingInt((Scored item) -> item.match().priority()).reversed()
+                .thenComparing(item -> item.match().state()!=RelationState.SUPPORTED));
         Set<Bound> result=new LinkedHashSet<>();
         int plain=0;
         for(Scored item:scored) {

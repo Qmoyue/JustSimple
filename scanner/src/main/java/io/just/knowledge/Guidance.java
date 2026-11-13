@@ -34,7 +34,7 @@ final class Guidance {
     boolean member(MethodId method) {
         if(!enabled || catalog.emptyRelations())return false;
         if(program.declared(method).filter(Method::hasBody).isEmpty())return false;
-        if(program.calls(method).value().orElseThrow().stream().noneMatch(call -> catalog.applicable(CallShape.signature(call.target()))))return false;
+        if(program.calls(method).value().orElseThrow().stream().noneMatch(call -> catalog.applicable(CallShape.signature(program,call.target()))))return false;
         // A receiver read from an owned slot is a useful handoff; a bare super forwarder is not.
         return local(method).value().orElseThrow().stream().filter(h -> !h.references().isEmpty()).flatMap(h -> h.requirements().stream())
                 .anyMatch(r -> r.pattern().operands().get(0).steps().stream().anyMatch(s -> s.kind()==CallShape.SourceKind.FIELD || s.kind()==CallShape.SourceKind.ELEMENT || s.kind()==CallShape.SourceKind.RETURN));
