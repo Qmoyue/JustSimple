@@ -27,6 +27,18 @@ final class Dynamic implements Model {
             if(value instanceof ProxyValue proxy)return Optional.of(Local.of(new RequireNormal(List.of()),Mechanisms.result(proxy.handler())));
             if(value.equals(new Literal(null)))return Optional.of(Local.of(new Raise("java/lang/NullPointerException")));
         }
+        if(call.is("java/lang/reflect/Proxy","isProxyClass","(Ljava/lang/Class;)Z")) {
+            Atom value=call.arguments().get(0);
+            if(value.equals(new Literal(null)))return Optional.of(Local.of(new Raise("java/lang/NullPointerException")));
+            if(value instanceof ClassValue type) {
+                if(type.source().filter(ValueSource.class::isInstance).map(ValueSource.class::cast).filter(source -> source.path().isEmpty() && source.producer() instanceof ProxyValue).isPresent())
+                    return Optional.of(Local.of(new RequireNormal(List.of()),Mechanisms.result(new Literal(1))));
+                if(type.exact()) {
+                    Query<Boolean> compatible=program.assignable(Values.type(type.descriptor()),type.loader(),"java/lang/reflect/Proxy",0);
+                    if(compatible.value().equals(Optional.of(false)) && compatible.pending().isEmpty())return Optional.of(Local.of(new RequireNormal(List.of()),Mechanisms.result(new Literal(0))));
+                }
+            }
+        }
         if (call.call().bootstrap().filter(b -> b.factory().target().owner().equals("java/lang/invoke/LambdaMetafactory")).isPresent())
             return Optional.of(lambda(call,program));
         if (call.is("java/lang/Class","getClassLoader","()Ljava/lang/ClassLoader;") && call.receiver() instanceof ClassValue type && type.exact())

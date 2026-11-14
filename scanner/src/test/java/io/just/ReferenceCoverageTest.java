@@ -15,6 +15,39 @@ import static org.junit.jupiter.api.Assertions.*;
 class ReferenceCoverageTest {
     @TempDir Path temp;
 
+    @Test void lazyHashAndPropertyReadersRetainTheirOwnValues()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,8,Map.of("LazyLinks.java","""
+            import java.lang.reflect.*;
+            public class LazyLinks {
+              interface Initializer {Object initialize();}
+              interface Getter {Object get(Object value);}
+              static class Holder {
+                Initializer initializer; Object value;
+                Object get(){if(value==null)value=initializer.initialize();return value;}
+                Object direct(){if(value==null)return initializer.initialize();return value;}
+              }
+              Holder holder; Getter[] getters; Method method;
+              int hash(){return ((Integer)holder.get()).intValue();}
+              int unrelated(Integer value){holder.get();return value.intValue();}
+              Object property(Object value,int index){return getters[index].get(value);}
+              Object unrelatedProperty(Object value,int index,Getter other){return other.get(value);}
+              Object reflect(Object value){try{return method.invoke(value,new Object[0]);}catch(Exception ignored){return null;}}
+              Object unrelatedReflect(Object value,Method other){try{return other.invoke(value,new Object[0]);}catch(Exception ignored){return null;}}
+            }
+            """));
+        try(Inputs inputs=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(inputs,20000);Catalog catalog=Catalog.builtin();String id="hibernate-lazy-property-handoff";
+            assertTrue(references(catalog,program,new MethodId("LazyLinks$Holder","get","()Ljava/lang/Object;"),id,"*"));
+            assertFalse(references(catalog,program,new MethodId("LazyLinks$Holder","direct","()Ljava/lang/Object;"),id,"*"));
+            assertTrue(references(catalog,program,new MethodId("LazyLinks","hash","()I"),id,"intValue"));
+            assertFalse(references(catalog,program,new MethodId("LazyLinks","unrelated","(Ljava/lang/Integer;)I"),id,"intValue"));
+            assertTrue(references(catalog,program,new MethodId("LazyLinks","property","(Ljava/lang/Object;I)Ljava/lang/Object;"),id,"*"));
+            assertFalse(references(catalog,program,new MethodId("LazyLinks","unrelatedProperty","(Ljava/lang/Object;ILLazyLinks$Getter;)Ljava/lang/Object;"),id,"*"));
+            assertTrue(references(catalog,program,new MethodId("LazyLinks","reflect","(Ljava/lang/Object;)Ljava/lang/Object;"),id,"invoke"));
+            assertFalse(references(catalog,program,new MethodId("LazyLinks","unrelatedReflect","(Ljava/lang/Object;Ljava/lang/reflect/Method;)Ljava/lang/Object;"),id,"invoke"));
+        }
+    }
+
     @Test void jdbcAndAccessibleReflectionFollowTheActualValues()throws Exception {
         Path classes=BytecodeFixtures.compile(temp,8,Map.of("DriverLinks.java","""
             import java.lang.reflect.*;

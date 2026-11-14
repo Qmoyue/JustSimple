@@ -233,9 +233,33 @@ final class MethodFlow {
                 }
             }
         }
+        // ASM visits every handler, even when its protected block contains only safe instructions.
+        // Keep unknown operations conservative without weakening guards on already reachable joins.
+        if(!node.tryCatchBlocks.isEmpty() && node.tryCatchBlocks.stream().anyMatch(handler -> !values.containsKey(node.instructions.indexOf(handler.handler)))) {
+            Set<Integer> possible=new HashSet<>(values.keySet());
+            for(TryCatchBlockNode handler:node.tryCatchBlocks) {
+                int start=node.instructions.indexOf(handler.start),end=node.instructions.indexOf(handler.end),target=node.instructions.indexOf(handler.handler);
+                boolean safe=true;for(int i=start;i<end && safe;i++)safe=cannotThrow(node.instructions.get(i).getOpcode());
+                if(!safe && possible.add(target))work.add(target);
+            }
+            while(!work.isEmpty())for(Edge edge:outgoing.getOrDefault(work.removeFirst(),List.of()))if(possible.add(edge.to()))work.add(edge.to());
+            for(Action action:actions)if(!possible.contains(action.site().instruction())) {
+                int at=action.site().instruction();values.put(at,Set.of(new Guard(at,at,GuardKind.UNREACHABLE)));
+            }
+        }
         Map<Integer, List<Guard>> result = new LinkedHashMap<>();
         values.forEach((key, guards) -> result.put(key, guards.stream().sorted(MethodFlow::compareGuard).toList()));
         return Map.copyOf(result);
+    }
+
+    private static boolean cannotThrow(int opcode) {
+        return opcode<0 || opcode==Opcodes.NOP || opcode>=Opcodes.ACONST_NULL && opcode<=Opcodes.SIPUSH
+                || opcode>=Opcodes.ILOAD && opcode<=Opcodes.ALOAD || opcode>=Opcodes.ISTORE && opcode<=Opcodes.ASTORE
+                || opcode>=Opcodes.POP && opcode<=Opcodes.SWAP || opcode==Opcodes.IINC
+                || opcode>=Opcodes.IADD && opcode<=Opcodes.LXOR && opcode!=Opcodes.IDIV && opcode!=Opcodes.LDIV && opcode!=Opcodes.IREM && opcode!=Opcodes.LREM
+                || opcode>=Opcodes.I2L && opcode<=Opcodes.DCMPG || opcode>=Opcodes.IFEQ && opcode<=Opcodes.GOTO
+                || opcode==Opcodes.IFNULL || opcode==Opcodes.IFNONNULL || opcode==Opcodes.TABLESWITCH || opcode==Opcodes.LOOKUPSWITCH
+                || opcode>=Opcodes.IRETURN && opcode<=Opcodes.RETURN;
     }
 
     private static JvmConstant scoped(JvmConstant value,int loader) {

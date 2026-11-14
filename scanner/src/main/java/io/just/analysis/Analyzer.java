@@ -349,7 +349,7 @@ public final class Analyzer {
 
     /** One fair queue: a noisy entry cannot fill the FIFO ahead of every other entry's callees. */
     private final class WorkQueue implements Iterable<Work> {
-        private enum Priority { RANKED, TARGET_MECHANISM, MECHANISM, ORDINARY }
+        private enum Priority { RANKED, TARGET_MECHANISM, MECHANISM, PARTIAL, ORDINARY }
         private record Root(int id,Priority priority) {}
         private final LinkedHashMap<Root,ArrayDeque<Work>> roots=new LinkedHashMap<>();
         private final double[] service=new double[Priority.values().length];
@@ -357,7 +357,10 @@ public final class Analyzer {
         private Root rootId(Work work){State state=work instanceof Unit unit?unit.state:states.get(((Backward)work).key.context());
             boolean mechanism=state.mechanism || work instanceof Backward && demandGuidance || work instanceof Unit unit && (unit.activation.isPresent() || unit.action instanceof Call call && (Mechanisms.demands(call) || knowledge.isImpact(call.target())));
             SearchRanking.Rank rank=work instanceof Unit unit?rank(unit):((Backward)work).rank;
-            Priority priority=rank.compareTo(SearchRanking.Rank.BOUND)>=0?Priority.RANKED:!mechanism?Priority.ORDINARY:program.type(state.facts.method().id().owner(),state.facts.method().id().loader()).filter(type -> type.role()==Inputs.Role.TARGET).isPresent()?Priority.TARGET_MECHANISM:Priority.MECHANISM;
+            Priority priority;
+            if(rank.compareTo(SearchRanking.Rank.BOUND)>=0)priority=Priority.RANKED;
+            else if(mechanism)priority=program.type(state.facts.method().id().owner(),state.facts.method().id().loader()).filter(type -> type.role()==Inputs.Role.TARGET).isPresent()?Priority.TARGET_MECHANISM:Priority.MECHANISM;
+            else priority=rank==SearchRanking.Rank.PARTIAL?Priority.PARTIAL:Priority.ORDINARY;
             State origin=state;
             while(origin.key.parent()>=0 && states.get(origin.key.parent()).mechanism==origin.mechanism)origin=states.get(origin.key.parent());
             return new Root(origin.id,priority);}
@@ -373,7 +376,7 @@ public final class Analyzer {
             ArrayDeque<Work> bucket=roots.remove(id);Work work=bucket.removeFirst();if(!bucket.isEmpty())roots.put(id,bucket);size--;return work;}
         void consumed(Work work,long cost) {
             Priority priority=rootId(work).priority();
-            int share=switch(priority){case RANKED -> 24;case TARGET_MECHANISM -> 22;case MECHANISM -> 7;case ORDINARY -> 1;};
+            int share=switch(priority){case RANKED -> 24;case TARGET_MECHANISM -> 22;case MECHANISM -> 7;case PARTIAL -> 2;case ORDINARY -> 1;};
             service[priority.ordinal()]+=(double)cost/share;
             floor=roots.keySet().stream().mapToDouble(root -> service[root.priority().ordinal()]).min().orElse(service[priority.ordinal()]);
         }
@@ -959,6 +962,7 @@ public final class Analyzer {
                 && source.thrown.alternatives().stream().allMatch(v -> v.path().choices().entrySet().stream().allMatch(c -> Objects.equals(unit.state.key.path().choices().get(c.getKey()),c.getValue()) || !conditions.uncertain(c.getKey())))
                 && dominates(unit.state,source.action.site().instruction(),unit.action.site().instruction())) return new ImpossibleGuard();
         for (Guard guard : unit.state.facts.guards().getOrDefault(unit.action.site().instruction(), List.of())) {
+            if(guard.kind()==GuardKind.UNREACHABLE)return new ImpossibleGuard();
             Optional<Iteration> scope=unit.iteration.filter(i -> i.loop().start()<=guard.branch() && guard.branch()<=i.loop().end());
             BranchKey key=guard.kind()==GuardKind.BRANCH?branchKey(unit.state,guard.branch(),scope):new BranchKey(unit.state.id,guard.branch(),scope.map(Iteration::index).orElse(-1));
             if (guard.kind()==GuardKind.HANDLER) {
@@ -1032,7 +1036,7 @@ public final class Analyzer {
         SearchRanking.Rank rank=rank(unit);
         Path path=unit.state.key.path();
         for (Guard guard:unit.state.facts.guards().getOrDefault(call.site().instruction(),List.of())) {
-            if (guard.kind()==GuardKind.HANDLER) continue;
+            if (guard.kind()==GuardKind.HANDLER || guard.kind()==GuardKind.UNREACHABLE) continue;
             Unit source=producer(unit,guard.branch(),false);
             if (source!=null && source.progress instanceof Waiting)
                 demand(unit.state,call.site(),new Producer(guard.branch()),path,iteration(source),0,rank);

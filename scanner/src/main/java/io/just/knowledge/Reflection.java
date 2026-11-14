@@ -18,6 +18,7 @@ final class Reflection implements Model {
     private record MemberChoices(Optional<MemberFamily> batch,ArrayDeque<Local> choices) {}
     Reflection(DynamicTargets targets){this.targets=targets;}
     static final MethodId INVOKE = new MethodId("java/lang/reflect/Method", "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
+    private static final Field OVERRIDE=new Field(new FieldId("java/lang/reflect/AccessibleObject","override","Z"));
 
     @Override public Optional<Local> apply(Invocation call, Bindings bindings, Program program) {
         if(call.is("java/lang/Class","getName","()Ljava/lang/String;") && call.receiver() instanceof ClassValue type) {
@@ -25,6 +26,64 @@ final class Reflection implements Model {
             String descriptor=type.descriptor();
             String name=switch(descriptor){case "Z" -> "boolean";case "B" -> "byte";case "C" -> "char";case "S" -> "short";case "I" -> "int";case "J" -> "long";case "F" -> "float";case "D" -> "double";case "V" -> "void";default -> descriptor.startsWith("L")?descriptor.substring(1,descriptor.length()-1).replace('/','.'):descriptor.replace('/','.');};
             return Optional.of(Local.of(new RequireNormal(List.of()),Mechanisms.result(new Literal(name))));
+        }
+        if(call.is("java/lang/Class","getInterfaces","()[Ljava/lang/Class;") && platformClass(call,program)) {
+            if(!(call.receiver() instanceof ClassValue owner) || !owner.exact())
+                return Optional.of(Local.of(new Result(Value.of(new Unknown("interface collection class is unspecified")).requiring(Mechanisms.unknown(call,"interface collection requires the actual Class")))));
+            List<String> names;List<Gap> pending=new ArrayList<>();String descriptor=owner.descriptor();int loader=owner.loader();
+            if(descriptor.startsWith("["))names=List.of("java/lang/Cloneable","java/io/Serializable");
+            else if(descriptor.length()==1)names=List.of();
+            else {
+                Query<ClassInfo> type=program.definition(Values.type(descriptor),loader);pending.addAll(Mechanisms.queryGaps(call,type));
+                if(type.value().isEmpty())return Optional.of(Local.of(new Result(Value.of(new Unknown("interface collection declaration is missing")).requiring(pending))));
+                names=type.value().orElseThrow().interfaces();
+                for(String name:names)pending.addAll(Mechanisms.queryGaps(call,program.definition(name,loader)));
+            }
+            ObjectValue array=new ObjectValue(call.result().id(),"[Ljava/lang/Class;",true,"Class.getInterfaces result");
+            List<Effect> effects=new ArrayList<>();effects.add(new RequireNormal(pending));
+            effects.add(new Write(array,new Length(),Value.of(new Literal(names.size())).requiring(pending)));
+            for(int i=0;i<names.size();i++) {
+                String name=names.get(i);effects.add(new Write(array,new Index(i),Value.of(new ClassValue("L"+name+";",true,Optional.empty(),program.scope(name,loader))).requiring(pending)));
+            }
+            effects.add(new Result(Value.of(array).requiring(pending)));return Optional.of(new Local(effects));
+        }
+        if(call.is("java/lang/Class","cast","(Ljava/lang/Object;)Ljava/lang/Object;") && platformClass(call,program) && call.receiver() instanceof ClassValue owner && owner.exact()) {
+            Atom value=call.arguments().get(0);
+            if(value instanceof Literal literal && literal.value()==null)return Optional.of(Local.of(new RequireNormal(List.of()),Mechanisms.result(value)));
+            if(owner.descriptor().length()>1) {
+                Compatibility match=compatible(value,owner.descriptor(),program,owner.loader());
+                if(match.match()==Match.INCOMPATIBLE)return Optional.of(Local.of(new Raise("java/lang/ClassCastException")));
+                if(match.match()==Match.COMPATIBLE) {
+                    List<Gap> pending=Mechanisms.queryGaps(call,new Query<>(Optional.empty(),match.pending()));
+                    return Optional.of(Local.of(new RequireNormal(pending),new Result(Value.of(value).requiring(pending))));
+                }
+            }
+        }
+        if(call.is("java/lang/Class","getDeclaredField","(Ljava/lang/String;)Ljava/lang/reflect/Field;") && platformClass(call,program) && call.receiver() instanceof ClassValue owner && owner.exact()) {
+            Atom name=call.arguments().get(0);
+            if(name instanceof Literal literal && literal.value()==null)return Optional.of(Local.of(new Raise("java/lang/NullPointerException")));
+            if(name instanceof Literal literal && literal.value() instanceof String text) {
+                if(!owner.descriptor().startsWith("L"))return Optional.of(Local.of(new Raise("java/lang/NoSuchFieldException")));
+                String type=Values.type(owner.descriptor());Query<ClassInfo> definition=program.definition(type,owner.loader());
+                if(definition.value().isEmpty()) {
+                    List<Gap> pending=Mechanisms.queryGaps(call,definition);
+                    return Optional.of(Local.of(new RequireNormal(pending),new Result(Value.of(new Unknown("field declaration is missing")).requiring(pending))));
+                }
+                boolean found=program.fields(type,owner.loader()).stream().anyMatch(field -> field.id().name().equals(text));
+                if(!found)return Optional.of(Local.of(new Raise("java/lang/NoSuchFieldException")));
+                ObjectValue field=new ObjectValue(call.result().id(),"java/lang/reflect/Field",true,"declared field metadata",false);
+                return Optional.of(Local.of(new RequireNormal(List.of()),new Write(field,OVERRIDE,Value.of(new Literal(0))),Mechanisms.result(field)));
+            }
+        }
+        if(call.receiver() instanceof ObjectValue field && field.type().equals("java/lang/reflect/Field")
+                && Set.of("java/lang/reflect/Field","java/lang/reflect/AccessibleObject").contains(call.call().target().owner())
+                && program.lookup(call.call().target()).value().flatMap(method -> program.type(method.id().owner(),method.id().loader())).filter(type -> type.role()==io.just.input.Inputs.Role.PLATFORM).isPresent()) {
+            Value access=bindings.read(field,OVERRIDE).under(call.path());
+            if(!access.empty() && call.call().target().name().equals("isAccessible") && call.call().target().descriptor().equals("()Z"))
+                return Optional.of(Local.of(new RequireNormal(List.of()),new Result(access)));
+            if(!access.empty() && call.call().target().name().equals("setAccessible") && call.call().target().descriptor().equals("(Z)V"))
+                return Optional.of(Local.of(new RequireNormal(List.of(Mechanisms.gap(call,GapKind.CONTROL_CONDITION,"access suppression requires the target platform permission and module policy"))),
+                        new Write(field,OVERRIDE,Value.of(call.arguments().get(0))),new Result(Value.NULL)));
         }
         if (call.receiver() instanceof Reflected method) {
             if (call.is("java/lang/reflect/Method","getName","()Ljava/lang/String;")) return Optional.of(Local.of(Mechanisms.result(method.name())));
@@ -46,6 +105,7 @@ final class Reflection implements Model {
                     : call.receiver() instanceof ArrayValue array ? new ClassValue(array.descriptor(),true)
                     : call.receiver() instanceof ClassValue ? new ClassValue("Ljava/lang/Class;", true)
                     : call.receiver() instanceof Reflected ? new ClassValue("Ljava/lang/reflect/Method;", true)
+                    : call.receiver() instanceof ProxyValue proxy ? new ClassValue("Ljava/lang/reflect/Proxy;",false,Optional.of(new ValueSource(call.result().id(),0,proxy,List.of())),0)
                     : call.receiver() instanceof Literal literal && literal.value() instanceof String
                     ? new ClassValue("Ljava/lang/String;", true) : new Unknown("runtime class is unspecified");
             return Optional.of(Local.of(new RequireNormal(call.receiver() instanceof ObjectValue object && !object.exact()?Mechanisms.unknown(call,"getClass requires a nonnull receiver"):List.of()),Mechanisms.result(value)));
@@ -364,6 +424,9 @@ final class Reflection implements Model {
     private static Local unresolved(Invocation call,List<Gap> gaps,List<Site> witnesses) {
         return Local.of(Mechanisms.result(new Unknown("unresolved reflective target")),
                 new Observe(Kind.REFLECTION,"generic Method.invoke; target requires concrete object and value bindings",witnesses,List.copyOf(gaps)));
+    }
+    private static boolean platformClass(Invocation call,Program program) {
+        return program.type("java/lang/Class",call.call().target().loader()).filter(type -> type.role()==io.just.input.Inputs.Role.PLATFORM).isPresent();
     }
     private static void frontier(List<Effect> effects,List<Gap> gaps,List<Site> witnesses) {
         effects.add(new Observe(Kind.REFLECTION,"unresolved reflective target frontier",witnesses,gaps));

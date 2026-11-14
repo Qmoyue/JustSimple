@@ -1540,7 +1540,7 @@ import java.nio.charset.StandardCharsets;
         assertEquals(Execution.TRUNCATED,result.execution());
         assertTrue(findings(result,"first").stream().anyMatch(f -> f.boundary()==Kind.DESERIALIZATION));
 
-        assertTrue(result.limitations().stream().anyMatch(l -> l.equals("scheduled instruction budget: 15")),result.limitations().toString());
+        assertTrue(result.limitations().stream().anyMatch(l -> l.equals("scheduled instruction budget: 15") || l.startsWith("work item budget: 15;")),result.limitations().toString());
     }
 
     @Test void reportReferencesPreserveTypedBindingsAndResolveEveryEvidencePointer() throws IOException {

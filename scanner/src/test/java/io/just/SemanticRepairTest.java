@@ -29,6 +29,164 @@ class SemanticRepairTest {
     private boolean calls(ScanResult result,String owner,String method) {
         return result.relations().stream().flatMap(r -> r.target().stream()).anyMatch(t -> t.owner().equals(owner) && t.name().equals(method));
     }
+    @Test void handlersNeedAnExceptionalOperationButKeepRealThrows()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,8,Map.of("CatchFlow.java","""
+                public class CatchFlow {
+                  static void yes(){} static void no(){} static void use(int value){}
+                  public static void safe(){try{int value=1;}catch(ArithmeticException impossible){no();}yes();}
+                  public static void zero(){int divisor=0;try{use(1/divisor);no();}catch(ArithmeticException expected){yes();}}
+                  public static void unknown(int divisor){try{use(1/divisor);no();}catch(ArithmeticException possible){yes();}}
+                  public static void nested(int divisor){boolean enabled=false;if(enabled){try{use(1/divisor);}catch(ArithmeticException ignored){}no();}yes();}
+                  public static void monitor(Object lock){try{synchronized(lock){}}catch(NullPointerException possible){yes();}}
+                }
+                """));
+        var safe=scan(classes,"CatchFlow","safe","()V");assertTrue(calls(safe,"CatchFlow","yes"));assertFalse(calls(safe,"CatchFlow","no"));
+        var zero=scan(classes,"CatchFlow","zero","()V");assertTrue(calls(zero,"CatchFlow","yes"));assertFalse(calls(zero,"CatchFlow","no"));
+        var unknown=scan(classes,"CatchFlow","unknown","(I)V");assertTrue(calls(unknown,"CatchFlow","yes"));assertTrue(calls(unknown,"CatchFlow","no"));
+        var nested=scan(classes,"CatchFlow","nested","(I)V");assertTrue(calls(nested,"CatchFlow","yes"));assertFalse(calls(nested,"CatchFlow","no"));
+        assertTrue(calls(scan(classes,"CatchFlow","monitor","(Ljava/lang/Object;)V"),"CatchFlow","yes"));
+    }
+    @Test void interfaceEnumerationUsesOnlyTheKnownDirectInterfaces()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,8,Map.of("Interfaces.java","""
+                public class Interfaces {
+                  interface Marker {}
+                  static class Parent implements Marker {}
+                  static class Child extends Parent {}
+                  static void yes(){} static void no(){}
+                  public static void direct(){if(Parent.class.getInterfaces().length==1)yes();else no();}
+                  public static void inherited(){if(Child.class.getInterfaces().length==1)no();else yes();}
+                  public static void array(){if(String[].class.getInterfaces().length==2)yes();else no();}
+                  public static void primitive(){if(int.class.getInterfaces().length==0)yes();else no();}
+                  public static void element(){if(Parent.class.getInterfaces()[0]==Marker.class)yes();else no();}
+                  public static void mutation(){Class<?>[] values=Parent.class.getInterfaces();values[0]=String.class;if(values[0]==String.class)yes();else no();}
+                  public static void unknown(Class<?> type){if(type.getInterfaces().length==1)yes();else no();}
+                }
+                """));
+        for(String entry:List.of("direct","inherited","array","primitive","element","mutation")) {
+            var result=scan(classes,"Interfaces",entry,"()V");
+            assertTrue(calls(result,"Interfaces","yes"),entry);
+            assertFalse(calls(result,"Interfaces","no"),entry);
+        }
+        var unknown=scan(classes,"Interfaces","unknown","(Ljava/lang/Class;)V");
+        assertTrue(calls(unknown,"Interfaces","yes"));assertTrue(calls(unknown,"Interfaces","no"));
+        Files.delete(classes.resolve("Interfaces$Parent.class"));
+        var missing=scan(classes,"Interfaces","direct","()V");
+        assertTrue(calls(missing,"Interfaces","yes"));assertTrue(calls(missing,"Interfaces","no"));
+        assertTrue(missing.relations().stream().filter(r -> r.target().filter(t -> t.owner().equals("Interfaces") && t.name().equals("yes")).isPresent())
+                .flatMap(r -> r.supports().stream()).flatMap(s -> s.gaps().stream()).anyMatch(g -> g.kind()==GapKind.MISSING_DEPENDENCY));
+    }
+    @Test void applicationClassNamedLikeThePlatformKeepsItsOwnBody()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,8,Map.of("Shadow.java","""
+                public class Shadow {
+                  static void yes(){} static void no(){}
+                  public static void run(){if(String.class.getInterfaces().length==0)yes();else no();}
+                }
+                """));
+        var writer=new org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS);
+        writer.visit(org.objectweb.asm.Opcodes.V1_8,org.objectweb.asm.Opcodes.ACC_PUBLIC,"java/lang/Class",null,"java/lang/Object",null);
+        var method=writer.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC,"getInterfaces","()[Ljava/lang/Class;",null,null);
+        method.visitCode();method.visitInsn(org.objectweb.asm.Opcodes.ICONST_0);method.visitTypeInsn(org.objectweb.asm.Opcodes.ANEWARRAY,"java/lang/Class");
+        method.visitInsn(org.objectweb.asm.Opcodes.ARETURN);method.visitMaxs(0,0);method.visitEnd();writer.visitEnd();
+        Path shadow=classes.resolve("java/lang/Class.class");Files.createDirectories(shadow.getParent());Files.write(shadow,writer.toByteArray());
+        var result=scan(classes,"Shadow","run","()V");
+        assertTrue(calls(result,"Shadow","yes"));assertFalse(calls(result,"Shadow","no"));
+    }
+    @Test void classCastPreservesSuccessfulAndExceptionalPaths()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,8,Map.of("ClassCasts.java","""
+                public class ClassCasts {
+                  static class Parent {} static class Child extends Parent {}
+                  static void yes(){} static void no(){}
+                  public static void compatible(){try{Parent.class.cast(new Child());yes();}catch(ClassCastException e){no();}}
+                  public static void incompatible(){try{Child.class.cast(new Parent());no();}catch(ClassCastException e){yes();}}
+                  public static void nullValue(){try{Child.class.cast(null);yes();}catch(ClassCastException e){no();}}
+                  public static void unknown(Object value){try{Child.class.cast(value);yes();}catch(ClassCastException e){no();}}
+                }
+                """));
+        for(String entry:List.of("compatible","incompatible","nullValue")) {
+            var result=scan(classes,"ClassCasts",entry,"()V");
+            assertTrue(calls(result,"ClassCasts","yes"),entry);assertFalse(calls(result,"ClassCasts","no"),entry);
+        }
+        var unknown=scan(classes,"ClassCasts","unknown","(Ljava/lang/Object;)V");
+        assertTrue(calls(unknown,"ClassCasts","yes"));assertTrue(calls(unknown,"ClassCasts","no"));
+    }
+    @Test void declaredFieldLookupDistinguishesOwnMissingAndInheritedMembers()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,8,Map.of("FieldLookup.java","""
+                public class FieldLookup {
+                  static class Parent {public int inherited;} static class Child extends Parent {private String own;}
+                  static void yes(){} static void no(){}
+                  public static void found(){try{Child.class.getDeclaredField("own");yes();}catch(NoSuchFieldException e){no();}}
+                  public static void absent(){try{Child.class.getDeclaredField("missing");no();}catch(NoSuchFieldException e){yes();}}
+                  public static void inherited(){try{Child.class.getDeclaredField("inherited");no();}catch(NoSuchFieldException e){yes();}}
+                  public static void unknown(String name){try{Child.class.getDeclaredField(name);yes();}catch(NoSuchFieldException e){no();}}
+                }
+                """));
+        for(String entry:List.of("found","absent","inherited")) {
+            var result=scan(classes,"FieldLookup",entry,"()V");
+            assertTrue(calls(result,"FieldLookup","yes"),entry);assertFalse(calls(result,"FieldLookup","no"),entry);
+        }
+        var unknown=scan(classes,"FieldLookup","unknown","(Ljava/lang/String;)V");
+        assertTrue(calls(unknown,"FieldLookup","yes"));assertTrue(calls(unknown,"FieldLookup","no"));
+        Files.delete(classes.resolve("FieldLookup$Child.class"));
+        var missing=scan(classes,"FieldLookup","found","()V");
+        assertTrue(calls(missing,"FieldLookup","yes"));assertTrue(calls(missing,"FieldLookup","no"));
+        assertTrue(missing.relations().stream().flatMap(r -> r.supports().stream()).flatMap(s -> s.gaps().stream()).anyMatch(g -> g.kind()==GapKind.MISSING_DEPENDENCY));
+    }
+    @Test void proxyClassChecksUseTheActualClassOrigin()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,8,Map.of("ProxyCheck.java","""
+                import java.lang.reflect.*;
+                public class ProxyCheck {
+                  interface Face {void call();}
+                  static class Handler implements InvocationHandler {public Object invoke(Object proxy,Method method,Object[] arguments){return null;}}
+                  static void yes(){} static void no(){}
+                  public static void generated(){Object value=Proxy.newProxyInstance(Face.class.getClassLoader(),new Class[]{Face.class},new Handler());if(Proxy.isProxyClass(value.getClass()))yes();else no();}
+                  public static void ordinary(){if(Proxy.isProxyClass(String.class))no();else yes();}
+                  public static void unknown(Class<?> value){if(Proxy.isProxyClass(value))yes();else no();}
+                }
+                """));
+        for(String entry:List.of("generated","ordinary")) {
+            var result=scan(classes,"ProxyCheck",entry,"()V");
+            assertTrue(calls(result,"ProxyCheck","yes"),entry);assertFalse(calls(result,"ProxyCheck","no"),entry);
+        }
+        var unknown=scan(classes,"ProxyCheck","unknown","(Ljava/lang/Class;)V");
+        assertTrue(calls(unknown,"ProxyCheck","yes"));assertTrue(calls(unknown,"ProxyCheck","no"));
+    }
+    @Test void constructorCountsUseDeclaredVisibilityAndKeepUnknownClassesUnresolved()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,8,Map.of("ConstructorCounts.java","""
+                public class ConstructorCounts {
+                  static class Type {public Type(){} private Type(int number){}}
+                  static void yes(){} static void no(){}
+                  public static void known(){if(Type.class.getDeclaredConstructors().length==2 && Type.class.getConstructors().length==1)yes();else no();}
+                  public static void unknown(Class<?> type){if(type.getConstructors().length==1)yes();else no();}
+                }
+                """));
+        var known=scan(classes,"ConstructorCounts","known","()V");
+        assertTrue(calls(known,"ConstructorCounts","yes"));assertFalse(calls(known,"ConstructorCounts","no"));
+        var unknown=scan(classes,"ConstructorCounts","unknown","(Ljava/lang/Class;)V");
+        assertTrue(calls(unknown,"ConstructorCounts","yes"));assertTrue(calls(unknown,"ConstructorCounts","no"));
+        Files.delete(classes.resolve("ConstructorCounts$Type.class"));
+        var missing=scan(classes,"ConstructorCounts","known","()V");
+        assertTrue(calls(missing,"ConstructorCounts","yes"));assertTrue(calls(missing,"ConstructorCounts","no"));
+        assertTrue(missing.relations().stream().flatMap(r -> r.supports().stream()).flatMap(s -> s.gaps().stream()).anyMatch(g -> g.kind()==GapKind.MISSING_DEPENDENCY));
+    }
+    @Test void reflectedFieldAccessFlagsBelongToTheSelectedFieldObject()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,8,Map.of("FieldAccess.java","""
+                import java.lang.reflect.*;
+                public class FieldAccess {
+                  static class Target {private int value;}
+                  static void yes(){} static void no(){}
+                  public static void fresh()throws Exception {Field field=Target.class.getDeclaredField("value");if(field.isAccessible())no();else yes();}
+                  public static void changed()throws Exception {Field field=Target.class.getDeclaredField("value");field.setAccessible(true);if(field.isAccessible())yes();else no();}
+                  public static void separate()throws Exception {Field first=Target.class.getDeclaredField("value"),second=Target.class.getDeclaredField("value");first.setAccessible(true);if(second.isAccessible())no();else yes();}
+                }
+                """));
+        for(String entry:List.of("fresh","separate")) {
+            var result=scan(classes,"FieldAccess",entry,"()V");
+            assertTrue(calls(result,"FieldAccess","yes"),entry);assertFalse(calls(result,"FieldAccess","no"),entry);
+        }
+        var changed=scan(classes,"FieldAccess","changed","()V");assertTrue(calls(changed,"FieldAccess","yes"));
+        assertTrue(changed.relations().stream().flatMap(r -> r.supports().stream()).flatMap(s -> s.gaps().stream())
+                .anyMatch(g -> g.kind()==GapKind.CONTROL_CONDITION && g.detail().contains("access suppression")));
+    }
     @Test void unsupportedBootstrapKeepsItsUnknownResultAndNormalCompletionCondition()throws Exception {
         Path classes=Files.createDirectory(temp.resolve("bootstrap"));
         var writer=new org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS);

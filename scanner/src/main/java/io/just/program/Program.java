@@ -107,7 +107,7 @@ public final class Program {
         public Sources { origins = Collections.unmodifiableSet(new LinkedHashSet<>(origins)); }
         public boolean parameter(int slot) { return origins.equals(Set.of(new Parameter(slot))); }
     }
-    public enum GuardKind { BRANCH, NORMAL, HANDLER }
+    public enum GuardKind { BRANCH, NORMAL, HANDLER, UNREACHABLE }
     public record Guard(int branch,int successor,GuardKind kind) { public Guard(int branch,int successor) { this(branch,successor,GuardKind.BRANCH); } }
     public record Handler(int start,int end,int target,String type) {}
     public record Edge(int from, int to, boolean exceptional) {}

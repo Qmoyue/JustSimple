@@ -158,6 +158,8 @@ final class HeapStore {
     boolean before(ExecutionPoint first,ExecutionPoint second){return order(first,second)<0;}
     private int order(ExecutionPoint first,ExecutionPoint second) {
         if(first.context()<0)return second.context()<0?0:-1;if(second.context()<0)return 1;
+        if(first.context()==second.context() && first.phase().equals(second.phase()))
+            return position(first.instruction(),second.instruction(),first.iteration(),second.iteration(),first.effects(),second.effects());
         List<Frame> leftPath=ancestry.get(first.context()),rightPath=ancestry.get(second.context());
         int common=0;while(common<leftPath.size() && common<rightPath.size() && leftPath.get(common).context()==rightPath.get(common).context())common++;
         if(common==0)return 0;
@@ -171,10 +173,13 @@ final class HeapStore {
         int rightInstruction=common==rightPath.size()?second.instruction():rightPath.get(common).instruction();
         int leftIteration=common==leftPath.size()?first.iteration():leftPath.get(common).iteration();
         int rightIteration=common==rightPath.size()?second.iteration():rightPath.get(common).iteration();
-        if(leftIteration>=0 && rightIteration>=0 && leftIteration!=rightIteration)return Integer.compare(leftIteration,rightIteration);
-        if(leftInstruction!=rightInstruction)return Integer.compare(leftInstruction,rightInstruction);
         List<Integer> left=common==leftPath.size()?first.effects():leftPath.get(common).effects();
         List<Integer> right=common==rightPath.size()?second.effects():rightPath.get(common).effects();
+        return position(leftInstruction,rightInstruction,leftIteration,rightIteration,left,right);
+    }
+    private static int position(int leftInstruction,int rightInstruction,int leftIteration,int rightIteration,List<Integer> left,List<Integer> right) {
+        if(leftIteration>=0 && rightIteration>=0 && leftIteration!=rightIteration)return Integer.compare(leftIteration,rightIteration);
+        if(leftInstruction!=rightInstruction)return Integer.compare(leftInstruction,rightInstruction);
         for(int i=0;i<Math.min(left.size(),right.size());i++)if(!left.get(i).equals(right.get(i)))return Integer.compare(left.get(i),right.get(i));
         return Integer.compare(left.size(),right.size());
     }

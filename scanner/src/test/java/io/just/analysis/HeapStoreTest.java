@@ -13,6 +13,19 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class HeapStoreTest {
     @TempDir Path temp;
+    @Test void sameContextOrderingRespectsIterationsEffectsAndRequestBoundaries()throws Exception {
+        Path classes=io.just.BytecodeFixtures.compile(temp,8,Map.of("HeapFixture.java","public class HeapFixture {}"));
+        try(Inputs inputs=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(inputs,20000);HeapStore heap=new HeapStore(program,new Conditions(program,new io.just.knowledge.Mechanisms(program)),64);heap.context(0,-1,-1,-1);
+            var request=new ExecutionPoint.Request(1);
+            var earlierLoop=new ExecutionPoint(0,20,0,request);var laterLoop=new ExecutionPoint(0,3,1,request);
+            assertTrue(heap.before(earlierLoop,laterLoop));assertFalse(heap.before(laterLoop,earlierLoop));
+            var first=new ExecutionPoint(0,7,-1,request,List.of(1,2));var second=new ExecutionPoint(0,7,-1,request,List.of(1,3));
+            assertTrue(heap.before(first,second));assertFalse(heap.before(second,first));
+            var otherRequest=new ExecutionPoint(0,8,-1,new ExecutionPoint.Request(2));
+            assertFalse(heap.before(first,otherRequest));assertFalse(heap.before(otherRequest,first));
+        }
+    }
     @Test void opaqueMutationKeepsArrayLengthButStillChangesElementsAndCollectionSize()throws Exception {
         Path classes=io.just.BytecodeFixtures.compile(temp,8,Map.of("HeapFixture.java","public class HeapFixture {}"));
         try(Inputs inputs=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {

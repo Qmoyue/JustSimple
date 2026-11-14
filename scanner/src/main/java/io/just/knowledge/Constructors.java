@@ -18,6 +18,18 @@ final class Constructors implements Model {
         if(!Set.of("java/lang/Class","java/lang/reflect/Constructor").contains(call.call().target().owner()))return Optional.empty();
         Query<Method> api=program.declaration(call.call().target());
         if(api.value().flatMap(m -> program.type(m.id().owner())).filter(c -> c.role()==io.just.input.Inputs.Role.PLATFORM).isEmpty())return Optional.empty();
+        if((call.is("java/lang/Class","getConstructors","()[Ljava/lang/reflect/Constructor;") || call.is("java/lang/Class","getDeclaredConstructors","()[Ljava/lang/reflect/Constructor;"))
+                && call.receiver() instanceof ClassValue owner && owner.exact()) {
+            boolean declared=call.call().target().name().equals("getDeclaredConstructors");int count=0;
+            if(owner.descriptor().startsWith("L")) {
+                Query<ClassInfo> type=program.definition(Values.type(owner.descriptor()),owner.loader());List<Gap> pending=Mechanisms.queryGaps(call,type);
+                if(type.value().isEmpty())return Optional.of(Local.of(new RequireNormal(pending),new Result(Value.of(new Unknown("constructor collection declaration is missing")).requiring(pending))));
+                count=(int)type.value().orElseThrow().methods().stream().filter(method -> method.id().name().equals("<init>") && (declared || method.isPublic())).count();
+            }
+            // The count is known; individual mutable Constructor objects stay unresolved until modeled.
+            ObjectValue array=new ObjectValue(call.result().id(),"[Ljava/lang/reflect/Constructor;",true,"constructor collection",false);
+            return Optional.of(Local.of(new RequireNormal(List.of()),new Write(array,new Length(),Value.of(new Literal(count))),Mechanisms.result(array)));
+        }
         if(call.is("java/lang/Class","getConstructor","([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;")
                 || call.is("java/lang/Class","getDeclaredConstructor","([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;")) {
             boolean declared=call.call().target().name().equals("getDeclaredConstructor");
@@ -47,7 +59,7 @@ final class Constructors implements Model {
                     Query<Method> method=program.constructor(Values.type(owner.descriptor()),types(signature.elements()),declared,owner.loader());
                     gaps.addAll(Mechanisms.queryGaps(call,method));
                     lookup=method.absent() || method.value().isPresent() && !sameSignature(method.value().get().id(),signature.elements(),program)?Local.of(new Raise("java/lang/NoSuchMethodException")):
-                            Local.of(new Result(Value.of(metadata(call,signature.elements(),declared)).requiring(gaps)));
+                            Local.of(new RequireNormal(gaps),new Result(Value.of(metadata(call,signature.elements(),declared)).requiring(gaps)));
                 } else lookup=Local.of(new RequireNormal(Mechanisms.unknown(call,"constructor lookup must resolve its class and signature")),Mechanisms.result(metadata(call,signature.elements(),declared)));
                 effects.add(new Conditional(signature.path(),List.copyOf(gaps),signature.dependencies(),lookup));
             }

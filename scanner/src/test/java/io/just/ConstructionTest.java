@@ -49,6 +49,7 @@ class ConstructionTest {
                   public static void abstractType()throws Exception {Constructor<Abstract> ctor=Abstract.class.getConstructor();try{ctor.newInstance();wrong();}catch(InstantiationException expected){good();}}
                   public static void absent()throws Exception {try{Child.class.getConstructor(String.class);wrong();}catch(NoSuchMethodException expected){good();}}
                   public static void interfaceType()throws Exception {try{Runnable.class.newInstance();wrong();}catch(InstantiationException expected){good();}}
+                  public static void concrete()throws Exception {try{Product.class.getDeclaredConstructor().newInstance();good();}catch(InstantiationException impossible){wrong();}}
                   public static void arguments()throws Exception {Constructor<Product> ctor=Product.class.getConstructor(String.class,String.class);try{ctor.newInstance("h",8);wrong();}catch(IllegalArgumentException expected){good();}}
                   public static void primitiveNull()throws Exception {Constructor<Primitive> ctor=Primitive.class.getConstructor(int.class);try{ctor.newInstance(new Object[]{null});wrong();}catch(IllegalArgumentException expected){good();}}
                   public static void primitiveNarrowing()throws Exception {Constructor<Primitive> ctor=Primitive.class.getConstructor(int.class);Object[] args={7L};try{ctor.newInstance(args);wrong();}catch(IllegalArgumentException expected){good();}}
@@ -68,6 +69,7 @@ class ConstructionTest {
     @Test void constructorsDoNotInheritAndInvalidAccessTypesOrArgumentsThrow()throws Exception {
         Path classes=fixture();
         for(String entry:List.of("access","abstractType","absent","interfaceType","arguments","primitiveNull","primitiveNarrowing"))assertEquals(Set.of("good"),targets(scan(classes,entry,"()V")),entry);
+        assertEquals(Set.of("good"),targets(scan(classes,"concrete","()V")),"a known concrete constructor does not throw InstantiationException");
         var overridden=scan(classes,"override","()V");assertTrue(targets(overridden).contains("good"));
         assertTrue(overridden.relations().stream().filter(r -> r.target().filter(t -> t.name().equals("good")).isPresent()).anyMatch(r -> r.supports().stream().allMatch(s -> !s.gaps().isEmpty())));
     }

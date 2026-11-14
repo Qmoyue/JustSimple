@@ -15,6 +15,22 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class RankingTest {
     @TempDir Path temp;
+    @Test void tentativeHandoffsGainTimeWithoutStarvingAnOrdinaryEntry()throws Exception {
+        StringBuilder source=new StringBuilder("public class Fair {static class Box {void use(Object value){}} static class Input {Box box;} static void valuable(){} static void ordinary(){} static void noise(){} public static void selected(Input in){in.box.use(in);valuable();} public static void holdout(){ordinary();}");
+        for(int i=0;i<20;i++)source.append("public static void n").append(i).append("(){noise();noise();noise();noise();}");source.append('}');
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("Fair.java",source.toString()));
+        try(Inputs input=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(input,20000);MethodId selected=new MethodId("Fair","selected","(LFair$Input;)V");
+            Path file=ReferenceFixtures.write(temp.resolve("reference.json"),program,selected);
+            Set<MethodId> entries=new LinkedHashSet<>();for(int i=0;i<20;i++)entries.add(new MethodId("Fair","n"+i,"()V"));
+            entries.add(new MethodId("Fair","holdout","()V"));entries.add(selected);
+            var result=new Analyzer(program,new Mechanisms(program,Catalog.read(file)),new Analyzer.Limits(500,70,20,5000,100,64))
+                    .scan(EntryPoints.Mode.COMPONENT,true,entries);
+            Set<String> reached=new HashSet<>();result.relations().stream().flatMap(r -> r.target().stream())
+                    .filter(t -> t.owner().equals("Fair") && Set.of("valuable","ordinary").contains(t.name())).forEach(t -> reached.add(t.name()));
+            assertEquals(Set.of("valuable","ordinary"),reached,"tentative guidance and an independent ordinary path both receive a turn");
+        }
+    }
     @Test void partialMemberShapesDoNotDisplaceTheOrdinaryProducerAndImpactFamilies()throws Exception {
         StringBuilder noise=new StringBuilder("public class Noise {StringBuilder owned;");
         for(int i=0;i<80;i++)noise.append("public String a").append(i).append("(){return owned.toString();}");
