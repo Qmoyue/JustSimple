@@ -12,6 +12,16 @@ import static org.junit.jupiter.api.Assertions.*;
 class ResolutionTest {
     @TempDir Path temp;
     private Inputs input(Path classes) throws Exception {return Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults());}
+    @Test void scanInstructionBudgetCanBeExpandedWithoutChangingMethodBudget()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("Budgeted.java","public class Budgeted {public static int value(){return 1+2;}}"));
+        try(Inputs input=input(classes)) {
+            MethodId method=new MethodId("Budgeted","value","()I");
+            var limited=new Program(input,20_000,1).facts(method);
+            assertTrue(limited.limitations().stream().anyMatch(limit -> limit.cause()==CoverageCause.BUDGET && limit.detail().startsWith("scan instruction budget (1)")));
+            var expanded=new Program(input,20_000,100).facts(method);
+            assertTrue(expanded.limitations().isEmpty());assertFalse(expanded.actions().isEmpty());
+        }
+    }
     @Test void reflectionOnArraysAndPrimitiveTypesUsesJvmMetadataRules() throws Exception {
         Path classes=BytecodeFixtures.compile(temp,17,Map.of("Existing.java","public class Existing {}"));
         try(Inputs input=input(classes)) {
@@ -26,6 +36,46 @@ class ResolutionTest {
                 assertTrue(program.methods(primitive,false).value().orElseThrow().isEmpty());
             }
             assertTrue(program.missingClasses().isEmpty(),"arrays and primitive classes do not require classfiles with descriptor names");
+        }
+    }
+    @Test void memberClassMetadataKeepsVisibilityLoadersAndMissingClasses()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("Family.java","""
+            public class Family {
+              public static class Parent {public static class Inherited {} private static class Hidden {}}
+              public static class Child extends Parent {public static class Public {} private static class Private {}}
+            }
+            """));
+        try(Inputs input=input(classes)) {
+            Program program=new Program(input,20_000);
+            var publicMembers=program.memberClasses("Family$Child",false,0,256);
+            assertTrue(publicMembers.pending().isEmpty());
+            assertEquals(Set.of("Family$Child$Public","Family$Parent$Inherited"),
+                    publicMembers.value().orElseThrow().stream().map(DefinedType::name).collect(java.util.stream.Collectors.toSet()));
+            assertEquals(Set.of("Family$Child$Public","Family$Child$Private"),program.memberClasses("Family$Child",true,0,256)
+                    .value().orElseThrow().stream().map(DefinedType::name).collect(java.util.stream.Collectors.toSet()));
+            for(String name:List.of("I","[Ljava/lang/String;"))assertTrue(program.memberClasses(name,false,0,256).value().orElseThrow().isEmpty());
+            Object loader=new Object();byte[] parent=Files.readAllBytes(classes.resolve("Family$Parent.class")),member=Files.readAllBytes(classes.resolve("Family$Parent$Inherited.class"));
+            int scope=program.define(loader,parent,parent,0,parent.length,null).value().orElseThrow().loader();
+            program.define(loader,member,member,0,member.length,null);
+            assertEquals(List.of(new DefinedType("Family$Parent$Inherited",scope)),program.memberClasses("Family$Parent",false,scope,256).value().orElseThrow());
+            assertTrue(program.memberClasses("Family$Child",false,0,1).pending().stream().anyMatch(issue -> issue.cause()==QueryCause.BUDGET));
+        }
+        Path incomplete=BytecodeFixtures.compile(temp,17,Map.of("Outer.java","public class Outer {public static class Member {}}"));
+        Files.delete(incomplete.resolve("Outer$Member.class"));
+        try(Inputs input=input(incomplete)) {
+            var members=new Program(input,20_000).memberClasses("Outer",false,0,256);
+            assertTrue(members.pending().stream().anyMatch(issue -> issue.cause()==QueryCause.MISSING_DEPENDENCY));
+        }
+        Path inconsistent=BytecodeFixtures.compile(temp,17,Map.of("Odd.java","public class Odd {private static class Member {}}"));
+        Path nested=inconsistent.resolve("Odd$Member.class");
+        var node=new org.objectweb.asm.tree.ClassNode();new org.objectweb.asm.ClassReader(Files.readAllBytes(nested)).accept(node,0);
+        node.innerClasses.stream().filter(entry -> "Odd$Member".equals(entry.name)).forEach(entry ->
+                entry.access=(entry.access & ~org.objectweb.asm.Opcodes.ACC_PRIVATE) | org.objectweb.asm.Opcodes.ACC_PUBLIC);
+        var writer=new org.objectweb.asm.ClassWriter(0);node.accept(writer);Files.write(nested,writer.toByteArray());
+        try(Inputs input=input(inconsistent)) {
+            var members=new Program(input,20_000).memberClasses("Odd",false,0,256);
+            assertTrue(members.pending().stream().anyMatch(issue -> issue.detail().contains("inconsistent member class metadata")));
+            assertTrue(members.value().orElseThrow().stream().anyMatch(member -> member.name().equals("Odd$Member")));
         }
     }
     @Test void syntaxQueriesDistinguishMissingInputFromAnAbsentMember() throws Exception {

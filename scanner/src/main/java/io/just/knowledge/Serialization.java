@@ -9,11 +9,13 @@ import java.util.*;
 final class Serialization implements Model {
     private final JdkStructures structure;
     private final Guidance guidance;
-    private record NativeType(ClassInfo type,Optional<Method> hash,List<Method> hooks,List<QueryIssue> pending) {}
+    private final int alternatives;
+    private record NativeType(ClassInfo type,Optional<Method> hash,List<Method> hooks,Query<Method> replacement,List<QueryIssue> pending) {}
     private int candidateDefinitions=-1;
+    private boolean candidateGuidance;
     private List<NativeType> nativeTypes=List.of();
     private List<QueryIssue> nativeFrontier=List.of();
-    Serialization(JdkStructures structure,Guidance guidance) { this.structure = structure;this.guidance=guidance; }
+    Serialization(JdkStructures structure,Guidance guidance,int alternatives) { this.structure = structure;this.guidance=guidance;this.alternatives=alternatives; }
     static MissingField missingField(ObjectValue receiver,FieldId field,Atom fallback,Program program) {
         if(receiver.source().filter(source -> source.path().stream().anyMatch(Decoded.class::isInstance)).isEmpty())return new MissingField(fallback,List.of());
         Optional<FieldInfo> declaration=program.fields(field.owner(),field.loader()).stream().filter(info -> info.id().equals(field)).findFirst();
@@ -90,11 +92,11 @@ final class Serialization implements Model {
         }
         Query<List<Bound>> origins=ValueBindings.sources(call.receiver(),bindings,call.path());
         List<Effect> alternatives=new ArrayList<>();List<Bound> sources=origins.value().orElseThrow();
-        if(sources.isEmpty())return Optional.of(Local.of(new Conditional(call.path(),Mechanisms.queryGaps(call,origins),Set.of(),unbound(call,program,Optional.empty()))));
+        if(sources.isEmpty())return Optional.of(Local.of(new Conditional(call.path(),Mechanisms.queryGaps(call,origins),Set.of(),unbound(call,bindings,program,Optional.empty()))));
         for(Bound source:sources) {
             StreamRead occurrence=new StreamRead(call.result().id(),call.call().site(),"Ljava/lang/Object;");
             Optional<InputSource> position=Values.source(source.atom()).map(input -> input.at(occurrence));
-            Local branch=Local.of(new Conditional(source.path(),source.gaps(),source.dependencies(),unbound(call,program,position)));
+            Local branch=Local.of(new Conditional(source.path(),source.gaps(),source.dependencies(),unbound(call,bindings,program,position)));
             alternatives.add(sources.size()==1?branch.effects().get(0):new Alternative(alternatives.size(),branch));
         }
         return Optional.of(Local.of(new Conditional(call.path(),Mechanisms.queryGaps(call,origins),Set.of(),new Local(alternatives))));
@@ -140,7 +142,7 @@ final class Serialization implements Model {
         boolean active=bindings.read(stream,new ActiveObject(object.id())).alternatives().stream().anyMatch(bound -> bound.atom() instanceof ObjectValue);
         if(active)return ready(Value.of(object).requiring(Mechanisms.queryGaps(call,replacement)).requiring(replacementHook.isPresent() || !replacement.pending().isEmpty()?List.of(Mechanisms.gap(call,GapKind.INPUT_BINDING,"active ancestor replacement is unresolved")):List.of()));
         if (!visited.add(object.id())) return ready(Value.of(atom).requiring(Mechanisms.queryGaps(call,replacement)).requiring(replacementHook.isPresent() || !replacement.pending().isEmpty()?List.of(Mechanisms.gap(call,GapKind.INPUT_BINDING,"cyclic readResolve identity is unresolved")):List.of()));
-        if (visited.size()>64) return remembered(stream,object,Value.of(new Truncated("serialized object visit budget")).requiring(List.of(Mechanisms.gap(call,GapKind.BUDGET,"serialized object visit budget (64)"))));
+        if (visited.size()>alternatives) return remembered(stream,object,Value.of(new Truncated("serialized object visit budget")).requiring(List.of(Mechanisms.gap(call,GapKind.BUDGET,"serialized object visit budget ("+alternatives+")"))));
         List<Effect> effects=new ArrayList<>();
         effects.add(new Write(stream,new ActiveObject(object.id()),Value.of(object)));
         List<Gap> gaps=new ArrayList<>(Mechanisms.queryGaps(call,replacement));
@@ -159,8 +161,8 @@ final class Serialization implements Model {
         if (object.type().startsWith("[")) {
             for (Bound length:bindings.read(object,new Length()).under(call.path()).alternatives())
                 if (length.atom() instanceof Literal value && value.value() instanceof Integer size && size>=0) {
-                    if(size>64)effects.add(memberFrontier(call,object,length,size));
-                    for (int i=0;i<Math.min(size,64);i++) {
+                    if(size>alternatives)effects.add(memberFrontier(call,object,length,size));
+                    for (int i=0;i<Math.min(size,alternatives);i++) {
                         Value elements=bindings.read(object,new SerializedIndex(i));
                         if (elements.empty()) elements=bindings.read(object,new Index(i));
                         for (Bound element:elements.under(length.path()).alternatives()) effects.add(new Conditional(element.path(),element.gaps(),element.dependencies(),
@@ -173,8 +175,8 @@ final class Serialization implements Model {
                     .map(JdkStructures.DecodedPath::witness).findFirst().orElse(new JdkStructures.Witness(List.of(),List.of()));
             for(Bound length:bindings.read(object,new Length()).under(call.path()).alternatives())
                 if(length.atom() instanceof Literal literal && literal.value() instanceof Integer size && size>=0) {
-                    if(size>64)effects.add(memberFrontier(call,object,length,size));
-                    for(int i=0;i<Math.min(size,64);i++) {
+                    if(size>alternatives)effects.add(memberFrontier(call,object,length,size));
+                    for(int i=0;i<Math.min(size,alternatives);i++) {
                         Value keys=bindings.read(object,set?new SerializedIndex(i):new SerializedKey(i));
                         Value values=set?Value.NULL:bindings.read(object,new SerializedValue(i));
                         for(Bound key:keys.alternatives())for(Bound value:values.under(key.path()).alternatives()) {
@@ -278,8 +280,8 @@ final class Serialization implements Model {
         }
         return new Local(selected);
     }
-    private static Effect memberFrontier(Invocation call,ObjectValue object,Bound length,int size) {
-        Gap gap=Mechanisms.gap(call,GapKind.BUDGET,"serialized member frontier at object "+object.id()+": indices [64,"+size+")");
+    private Effect memberFrontier(Invocation call,ObjectValue object,Bound length,int size) {
+        Gap gap=Mechanisms.gap(call,GapKind.BUDGET,"serialized member frontier at object "+object.id()+": indices ["+alternatives+","+size+")");
         return new Conditional(length.path(),length.gaps(),length.dependencies(),Local.of(new Observe(Kind.DESERIALIZATION,gap.detail(),List.of(call.call().site()),List.of(gap))));
     }
     private static Local remembered(ObjectValue stream,ObjectValue object,Value value) {
@@ -443,28 +445,30 @@ final class Serialization implements Model {
     }
     /** Bytecode-only eligibility is shared by stream bindings; pending queries remain pending. */
     private List<NativeType> nativeTypes(Program program) {
-        if(candidateDefinitions==program.definitionCount())return nativeTypes;
+        boolean rankingActive=guidance.active();
+        if(candidateDefinitions==program.definitionCount() && candidateGuidance==rankingActive){if(rankingActive)guidance.note(nativeFrontier);return nativeTypes;}
         List<ClassInfo> types=structure.targets();List<NativeType> preferred=new ArrayList<>(),examined=new ArrayList<>();
-        List<QueryIssue> frontier=new ArrayList<>();int at=0;
-        if(guidance.active())for(;at<types.size() && at<2048 && preferred.size()<48;at++) {
+        List<QueryIssue> frontier=new ArrayList<>();int at=0,metadataLimit=guidance.metadataLimit();
+        if(rankingActive)for(;at<types.size() && at<metadataLimit && preferred.size()<guidance.preferenceLimit();at++) {
             Optional<NativeType> candidate=nativeType(types.get(at),program);if(candidate.isEmpty())continue;
             NativeType value=candidate.orElseThrow();examined.add(value);
             List<Method> callbacks=new ArrayList<>(value.hooks());value.hash().ifPresent(callbacks::add);
             Query<Boolean> match=guidance.callbacks(callbacks);frontier.addAll(match.pending());
             if(match.value().orElseThrow())preferred.add(value);
         }
-        if(at==2048 && at<types.size())frontier.add(new QueryIssue(QueryCause.BUDGET,"relation native callback metadata frontier (2048)"));
+        if(at==metadataLimit && at<types.size())frontier.add(new QueryIssue(QueryCause.BUDGET,"relation native callback metadata frontier ("+metadataLimit+")"));
         nativeFrontier=List.copyOf(new LinkedHashSet<>(frontier));
+        guidance.note(nativeFrontier);
         ArrayDeque<NativeType> ranked=new ArrayDeque<>(preferred),plain=new ArrayDeque<>(examined);
         Set<ClassInfo> seen=new HashSet<>();List<NativeType> found=new ArrayList<>();int turn=0;
-        while(found.size()<65 && (!ranked.isEmpty() || !plain.isEmpty() || at<types.size())) {
+        while(found.size()<=alternatives && (!ranked.isEmpty() || !plain.isEmpty() || at<types.size())) {
             if(plain.isEmpty())while(at<types.size() && plain.isEmpty())nativeType(types.get(at++),program).ifPresent(plain::addLast);
             NativeType candidate;
             if(!ranked.isEmpty() && (turn++%4!=3 || plain.isEmpty()))candidate=ranked.removeFirst();
             else if(!plain.isEmpty())candidate=plain.removeFirst();else break;
             if(seen.add(candidate.type()))found.add(candidate);
         }
-        candidateDefinitions=program.definitionCount();nativeTypes=List.copyOf(found);return nativeTypes;
+        candidateDefinitions=program.definitionCount();candidateGuidance=rankingActive;nativeTypes=List.copyOf(found);return nativeTypes;
     }
     private Optional<NativeType> nativeType(ClassInfo type,Program program) {
         if((type.access() & (org.objectweb.asm.Opcodes.ACC_ABSTRACT|org.objectweb.asm.Opcodes.ACC_INTERFACE))!=0)return Optional.empty();
@@ -482,9 +486,9 @@ final class Serialization implements Model {
             Query<Method> hook=program.lookup(program.method(type.name(),"readExternal","(Ljava/io/ObjectInput;)V",type.loader()));pending.addAll(hook.pending());
             hook.value().filter(Serialization::readExternalHook).ifPresent(hooks::add);
         }
-        return hash.isEmpty() && hooks.isEmpty()?Optional.empty():Optional.of(new NativeType(type,hash,List.copyOf(hooks),List.copyOf(new LinkedHashSet<>(pending))));
+        return hash.isEmpty() && hooks.isEmpty()?Optional.empty():Optional.of(new NativeType(type,hash,List.copyOf(hooks),replacement,List.copyOf(new LinkedHashSet<>(pending))));
     }
-    private Local unbound(Invocation call,Program program,Optional<InputSource> source) {
+    private Local unbound(Invocation call,Bindings bindings,Program program,Optional<InputSource> source) {
         List<Effect> effects = new ArrayList<>();
         List<Gap> missingInput = Mechanisms.unknown(call, "serialized root type, element membership and concrete field values were not provided as verified static input");
         ObjectValue decoded = new ObjectValue(call.result().id(), "java/lang/Object", false, "decoded object at " + call.call().site(),false,source.map(input -> input.at(new Decoded())));
@@ -492,11 +496,10 @@ final class Serialization implements Model {
         List<Atom> candidates=new ArrayList<>();
         effects.add(new Observe(Kind.DESERIALIZATION, "native object read; stream receiver=" + call.receiver(), List.of(call.call().site()), missingInput));
         List<NativeType> sources=nativeTypes(program);
-        if(!nativeFrontier.isEmpty())effects.add(new Observe(Kind.DESERIALIZATION,"native member relation frontier",List.of(call.call().site()),Mechanisms.queryGaps(call,new Query<>(Optional.empty(),nativeFrontier))));
         for (NativeType candidate:sources) {
             ClassInfo type=candidate.type();Optional<Method> hash=candidate.hash();
             List<Gap> eligibility=new ArrayList<>(missingInput);eligibility.addAll(Mechanisms.queryGaps(call,new Query<>(Optional.empty(),candidate.pending())));
-            if(candidates.size()>=64) {effects.add(new Observe(Kind.DESERIALIZATION,"unexplored native member candidates",List.of(call.call().site()),List.of(Mechanisms.gap(call,GapKind.BUDGET,"conditional serialized type frontier (64)"))));break;}
+            if(candidates.size()>=alternatives) {effects.add(new Observe(Kind.DESERIALIZATION,"unexplored native member candidates",List.of(call.call().site()),List.of(Mechanisms.gap(call,GapKind.BUDGET,"conditional serialized type frontier ("+alternatives+")"))));break;}
             candidates.add(new Values.ClassValue("L"+type.name()+";",true,Optional.empty(),type.loader()));
             if (hash.isPresent() && !structure.decodedKeyPaths().isEmpty()) {
                 for (JdkStructures.DecodedPath decodedPath : structure.decodedKeyPaths()) {
@@ -506,7 +509,43 @@ final class Serialization implements Model {
                     List<Effect> callback=new ArrayList<>();
                     callback.add(new Need(new InputNeed(decoded,Optional.empty(),NeedKind.RECEIVER_TYPE,"L"+decodedPath.owner()+";",List.of(new Values.ClassValue("L"+decodedPath.owner()+";",true)),"container required by decoded-key callback")));
                     callback.add(new Need(new InputNeed(decoded,Optional.of(member),NeedKind.SERIALIZED_MEMBERS,"L"+type.name()+";",List.of(new Values.ClassValue("L"+type.name()+";",true,Optional.empty(),type.loader())),"key/element required by this callback; map values do not trigger key hashing")));
-                    callback.add(new Dispatch(hash.get().id(), new Symbolic(type.name(), "possible serialized container key/element; exact stream membership missing",decoded.source().map(s -> s.at(member)),type.loader()),
+                    Symbolic possible=new Symbolic(type.name(),"possible serialized container key/element; exact stream membership missing",decoded.source().map(s -> s.at(member)),type.loader());
+                    Atom receiver=possible;
+                    boolean hasHook=candidate.hooks().stream().anyMatch(method -> readObjectHook(method) || readExternalHook(method) || noDataHook(method));
+                    boolean replacement=false;
+                    if((hasHook || candidate.replacement().value().isPresent()) && candidate.replacement().pending().isEmpty() && call.receiver() instanceof ObjectValue stream) {
+                        Optional<ObjectValue> actual=bindings.materialize(possible);
+                        if(actual.isPresent()) {
+                            ObjectValue selected=actual.orElseThrow();
+                            // This alternative requires the decoded member to have exactly this runtime class.
+                            receiver=new ObjectValue(selected.id(),type.name(),true,selected.origin(),false,selected.source(),type.loader());
+                            callback.add(new IgnoreResult(visit(call,stream,receiver,bindings,program,new LinkedHashSet<>())));
+                            if(candidate.replacement().value().isPresent()) {
+                                replacement=true;
+                                for(Bound bound:bindings.read(stream,new ResolvedObject(selected.id())).under(call.path()).alternatives()) {
+                                    Atom value=bound.atom();
+                                    if(value instanceof Literal)continue;
+                                    List<Gap> gaps=new ArrayList<>(unionIssues(call,eligibility,witness));
+                                    MethodId target=hash.get().id();Atom resolved=value;
+                                    if(value instanceof ObjectValue object && object.exact()) {
+                                        Query<Method> lookup=program.lookup(program.method(object.type(),"hashCode","()I",object.loader()));
+                                        gaps.addAll(Mechanisms.queryGaps(call,lookup));
+                                        if(lookup.value().isEmpty()) {
+                                            callback.add(new Conditional(bound.path(),bound.gaps(),bound.dependencies(),Local.of(new Observe(Kind.CONTAINER_CALLBACK,"resolved key hash target is unavailable",path,gaps))));
+                                            continue;
+                                        }
+                                        target=lookup.value().orElseThrow().id();
+                                    } else {
+                                        resolved=receiver;
+                                        gaps.add(Mechanisms.gap(call,GapKind.INPUT_BINDING,"readResolve replacement identity and hash target are unresolved"));
+                                    }
+                                    callback.add(new Conditional(bound.path(),bound.gaps(),bound.dependencies(),Local.of(new Dispatch(target,resolved,
+                                            List.of(),Kind.CONTAINER_CALLBACK,Evidence.CONDITIONAL,path,List.copyOf(gaps),ReturnFlow.IGNORE,ExceptionFlow.DIRECT))));
+                                }
+                            }
+                        }
+                    }
+                    if(!replacement)callback.add(new Dispatch(hash.get().id(),receiver,
                             List.of(), Kind.CONTAINER_CALLBACK, Evidence.CONDITIONAL, path, unionIssues(call,eligibility,witness),ReturnFlow.IGNORE,ExceptionFlow.DIRECT));
                     effects.add(new Alternative(effects.size(),new Local(callback)));
                 }

@@ -10,6 +10,12 @@ import java.util.*;
 public final class Mechanisms {
     public interface Bindings {
         Value read(ObjectValue object, Slot slot);
+        default int alternatives(){return 64;}
+        default Optional<ObjectValue> materialize(Symbolic value){return Optional.empty();}
+    }
+    private record LimitedBindings(Bindings source,int alternatives) implements Bindings {
+        @Override public Value read(ObjectValue object,Slot slot){return source.read(object,slot);}
+        @Override public Optional<ObjectValue> materialize(Symbolic value){return source.materialize(value);}
     }
     public enum Evaluation { CALL, COMPARED_KEYS }
     public record Invocation(Call call, Atom receiver, List<Atom> arguments, ObjectValue result, Path path,Evaluation evaluation) {
@@ -87,20 +93,26 @@ public final class Mechanisms {
     private final Program program;
     private final Catalog catalog;
     private final Guidance guidance;
+    private final Dynamic dynamic;
     private final Set<MethodId> sinks;
+    private final int alternatives;
 
     public Mechanisms(Program program) {
         this(program,Catalog.empty());
     }
     public Mechanisms(Program program,Catalog catalog) {this(program,catalog,Set.of());}
-    public Mechanisms(Program program,Catalog catalog,Set<MethodId> sinks) {
+    public Mechanisms(Program program,Catalog catalog,Set<MethodId> sinks) {this(program,catalog,sinks,64);}
+    public Mechanisms(Program program,Catalog catalog,Set<MethodId> sinks,int alternatives) {
+        if(alternatives<1)throw new IllegalArgumentException("alternative budget must be positive");
+        this.alternatives=alternatives;
         this.sinks=Set.copyOf(sinks);
         this.program=program;
         this.catalog=catalog;
-        this.guidance=new Guidance(program,catalog);
+        this.guidance=new Guidance(program,catalog,alternatives);
+        this.dynamic=new Dynamic();
         JdkStructures structure = new JdkStructures(program);
         Containers containers=new Containers(structure);
-        models = List.of(new ClassLoading(), new Reflection(new DynamicTargets(program,sinks,guidance)), new Constructors(guidance), new Dynamic(), new Handles(), new Strings(), new HttpBridge(), new Threads(), new Processes(), new PrivilegedActions(), new NamingReferences(), new NamingFactories(structure), new ClassDefinitions(), new Serialization(structure,guidance), containers, new Library());
+        models = List.of(new ClassLoading(), new Reflection(new DynamicTargets(program,sinks,guidance)), new ArrayOperations(), new Constructors(guidance), dynamic, new Handles(), new Strings(), new HttpBridge(), new Threads(), new Processes(), new PrivilegedActions(), new NamingReferences(), new NamingFactories(structure), new ClassDefinitions(), new Serialization(structure,guidance,alternatives), containers, new Library(alternatives));
     }
 
     public void requireProgram(Program expected) {
@@ -109,6 +121,7 @@ public final class Mechanisms {
 
     public boolean isImpact(MethodId id){return impact(id) || sinks.contains(id);}
     public Optional<Local> apply(Invocation invocation, Bindings bindings) {
+        if(bindings.alternatives()!=alternatives)bindings=new LimitedBindings(bindings,alternatives);
         Call call=invocation.call();
         boolean unresolvedVirtual=false;
         if(call.bootstrap().isEmpty()) {
@@ -161,6 +174,7 @@ public final class Mechanisms {
         return checked && !pending && !frontier?Optional.of(true):Optional.empty();
     }
     public Optional<Atom> staticField(FieldId field) { return Library.staticField(field); }
+    public Optional<Local> serializedProxy(Invocation invocation,int alternatives) {return dynamic.serializedProxy(invocation,program,guidance,alternatives);}
     public record MissingField(Atom value,List<InputNeed> needs) {public MissingField {needs=List.copyOf(needs);}}
     public MissingField missingField(ObjectValue receiver,FieldId field,Atom fallback){return Serialization.missingField(receiver,field,fallback,program);}
 
@@ -185,6 +199,7 @@ public final class Mechanisms {
     }
     public Query<List<DefinedType>> preferredReceivers(MethodId requested,String upper,int loader){return guidance.receivers(requested,upper,loader);}
     public boolean preferredMember(MethodId member){return guidance.member(member);}
+    public List<QueryIssue> rankingIssues(){return guidance.issues();}
 
     static Gap gap(Invocation call, GapKind kind, String detail) { return new Gap(kind, call.call().site(), detail); }
     static List<Gap> queryGaps(Invocation call,Program.Query<?> query) {

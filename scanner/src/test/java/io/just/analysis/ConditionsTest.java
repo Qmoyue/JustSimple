@@ -5,6 +5,7 @@ import io.just.input.Inputs;
 import io.just.knowledge.Mechanisms;
 import io.just.knowledge.Mechanisms.*;
 import io.just.knowledge.Values.*;
+import io.just.knowledge.Values.ClassValue;
 import io.just.program.Program;
 import io.just.program.Program.*;
 import org.junit.jupiter.api.Test;
@@ -16,6 +17,43 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ConditionsTest {
     @TempDir Path temp;
+    @Test void scalarRangesProveOnlyTheCompatibleBranch()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("Fixture.java","public class Fixture {}"));
+        try(Inputs inputs=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(inputs,20_000);Conditions conditions=new Conditions(program,new Mechanisms(program));
+            MethodId entry=new MethodId("Fixture","run","(I)V");Site site=new Site(entry,4,1,"fixture");
+            InputSource source=new InputSource(entry,0,List.of());ExternalValue upper=new ExternalValue("I",source);
+            Branch branch=new Branch(site,org.objectweb.asm.Opcodes.IF_ICMPGE,List.of(new Sources(Set.of()),new Sources(Set.of())),10);
+            BranchKey key=new BranchKey(0,4,0);
+            conditions.branch(key,branch,List.of(Value.of(new Literal(2)),Value.of(upper)),List.of(new Edge(4,5,false),new Edge(4,10,false)),
+                    new Gap(GapKind.CONTROL_CONDITION,site,"unknown bound"));
+            var continued=io.just.knowledge.Values.Path.EMPTY.with(key,5).orElseThrow();
+            var exited=io.just.knowledge.Values.Path.EMPTY.with(key,10).orElseThrow();
+            var above=io.just.knowledge.Values.Path.EMPTY.restricting(source,upper,"I",new IntegralRange(3,10)).orElseThrow();
+            var below=io.just.knowledge.Values.Path.EMPTY.restricting(source,upper,"I",new IntegralRange(-5,2)).orElseThrow();
+            InputSource other=new InputSource(entry,1,List.of());ExternalValue otherUpper=new ExternalValue("I",other);
+            var anotherInput=io.just.knowledge.Values.Path.EMPTY.restricting(other,otherUpper,"I",new IntegralRange(3,10)).orElseThrow();
+            assertTrue(conditions.implied(continued,above));assertFalse(conditions.implied(exited,above));
+            assertTrue(conditions.implied(exited,below));assertFalse(conditions.implied(continued,below));
+            assertFalse(conditions.implied(continued,io.just.knowledge.Values.Path.EMPTY));
+            assertFalse(conditions.implied(continued,anotherInput));
+            conditions.branch(key,branch,List.of(Value.of(new Literal(2)).merge(Value.of(new Literal(9))),Value.of(upper)),
+                    List.of(new Edge(4,5,false),new Edge(4,10,false)),new Gap(GapKind.CONTROL_CONDITION,site,"multiple counters"));
+            assertFalse(conditions.implied(continued,above));
+        }
+    }
+    @Test void finiteRuntimeTypeGroupsIntersectWithoutBorrowingAnotherLoaderOrReceiver() {
+        MethodId entry=new MethodId("Fixture","run","(Ljava/lang/Object;Ljava/lang/Object;)V");
+        InputSource first=new InputSource(entry,0,List.of(new RuntimeClass())),second=new InputSource(entry,1,List.of(new RuntimeClass()));
+        ClassValue a=new ClassValue("LA;",true),b=new ClassValue("LB;",true),otherLoader=new ClassValue("LA;",true,Optional.empty(),1);
+        var group=io.just.knowledge.Values.Path.EMPTY.selecting(first,new RuntimeTypes(List.of(a,b))).orElseThrow();
+        var selectA=io.just.knowledge.Values.Path.EMPTY.selecting(first,a).orElseThrow();
+        var foreign=io.just.knowledge.Values.Path.EMPTY.selecting(first,otherLoader).orElseThrow();
+        assertTrue(group.and(selectA).isPresent());assertFalse(group.and(foreign).isPresent());
+        assertTrue(group.and(io.just.knowledge.Values.Path.EMPTY.selecting(second,otherLoader).orElseThrow()).isPresent());
+        var overlap=io.just.knowledge.Values.Path.EMPTY.selecting(first,new RuntimeTypes(List.of(b,otherLoader))).orElseThrow();
+        assertEquals(b,group.and(overlap).orElseThrow().selected(first).orElseThrow());
+    }
     @Test void heapGrowthRefreshesNormalCompletionAndContradictionOnlyRejectsThatChoice() throws Exception {
         Path classes=BytecodeFixtures.compile(temp,17,Map.of("Fixture.java","public class Fixture {}"));
         try(Inputs inputs=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {

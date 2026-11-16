@@ -118,7 +118,8 @@ final class CandidateBindings {
             return Mechanisms.concatenate(List.of(new Literal(prefix.prefix()),suffix));
         }
         if(atom instanceof StringConcat sequence)return Mechanisms.concatenate(sequence.pieces().stream().map(piece -> project(piece,path)).toList());
-        if(atom instanceof Reflected method)return new Reflected(project(method.declaringClass(),path),project(method.name(),path),project(method.parameterTypes(),path),method.declared(),method.lookup());
+        if(atom instanceof InstanceTest test)return new InstanceTest(project(test.receiver(),path),test.type(),test.loader());
+        if(atom instanceof Reflected method)return new Reflected(project(method.declaringClass(),path),project(method.name(),path),project(method.parameterTypes(),path),method.declared(),method.lookup(),method.object(),method.member());
         Optional<InputLocation> source=Values.location(atom);
         if(source.isEmpty())return atom;
         Atom selection=path.selected(source.get()).orElse(null);
@@ -136,6 +137,9 @@ final class CandidateBindings {
         if(atom instanceof ObjectValue object) {
             Atom runtime=path.selected(source.get().at(new RuntimeClass())).orElse(null);
             if(runtime instanceof ClassValue type)return new ObjectValue(object.id(),Values.type(type.descriptor()),true,object.origin(),object.defaultFields(),object.source(),type.loader());
+            if(runtime instanceof RuntimeTypes types && types.members().size()==1) {
+                ClassValue type=types.members().get(0);return new ObjectValue(object.id(),Values.type(type.descriptor()),true,object.origin(),object.defaultFields(),object.source(),type.loader());
+            }
             if(object.type().startsWith("["))return object; // Current heap writes take precedence over input shape choices.
             if(!object.exact() && object.type().equals("java/lang/Object") && selection instanceof Symbolic typed && !typed.type().equals("java/lang/Object"))
                 return new ObjectValue(object.id(),typed.type(),false,object.origin(),object.defaultFields(),object.source(),typed.loader());

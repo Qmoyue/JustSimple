@@ -225,14 +225,14 @@ final class ScannerTools implements AutoCloseable {
         // Independent scan state prevents exploratory queries from consuming the complete scanner's budgets.
         Inputs scanInput=open();boolean retained=false;
         try {
-            Program scanProgram=new Program(scanInput,config.methodInstructions());
+            Program scanProgram=new Program(scanInput,config.methodInstructions(),Math.max(Program.DEFAULT_SCAN_INSTRUCTION_LIMIT,budget.steps()));
             Optional<StaticData> data=config.staticData()==null?Optional.empty():Optional.of(StaticData.read(Path.of(config.staticData())));
-            ScanResult result=new Analyzer(scanProgram,new Mechanisms(scanProgram,selected,methods(scanProgram,args,"sinks")),budget,
+            ScanResult result=new Analyzer(scanProgram,new Mechanisms(scanProgram,selected,methods(scanProgram,args,"sinks"),budget.alternatives()),budget,
                     demandGuidance).scan(mode(args),true,methods(scanProgram,args,"entries"),data,progress);
             String ref=results.save(writer -> Reports.json(result,writer));scans.put(ref,new Scan(scanInput,scanProgram,result));retained=true;
             JsonObject summary=new JsonObject();summary.addProperty("execution",result.execution().name());summary.addProperty("outcome",result.outcome().name());
             summary.addProperty("entries",result.entries().size());summary.addProperty("relations",result.relations().size());summary.addProperty("findings",result.findings().size());summary.addProperty("breakpoints",result.breakpoints().size());summary.addProperty("demandFrontier",result.demandFrontier().size());
-            summary.add("statistics",ToolJson.GSON.toJsonTree(result.statistics()));summary.add("budgets",ToolJson.GSON.toJsonTree(budget));summary.addProperty("limitations",result.limitations().size());summary.addProperty("missingClasses",result.missingClasses().size());
+            summary.add("statistics",ToolJson.GSON.toJsonTree(result.statistics()));summary.add("budgets",ToolJson.GSON.toJsonTree(budget));summary.addProperty("limitations",result.limitations().size());summary.addProperty("rankingIssues",result.rankingIssues().size());summary.addProperty("missingClasses",result.missingClasses().size());
             if(!result.limitations().isEmpty())summary.addProperty("firstLimitation",brief(result.limitations().get(0)));
             return new Reply(identity,ref,"scan_target",elapsed(start),summary);
         } finally {if(!retained)scanInput.close();}

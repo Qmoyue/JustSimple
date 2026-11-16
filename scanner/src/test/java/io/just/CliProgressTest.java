@@ -43,6 +43,28 @@ class CliProgressTest {
         JsonObject json=JsonParser.parseString(Files.readString(temp.resolve("unicode/report.json"))).getAsJsonObject();
         assertEquals(1,json.getAsJsonArray("findings").size());
     }
+    @Test void cliAlternativeBudgetExpandsSerializedTypeCandidates()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("InputCandidates.java","""
+                import java.io.*;
+                public class InputCandidates {
+                  public static class A implements Serializable {private void readObject(ObjectInputStream in){}}
+                  public static class B implements Serializable {private void readObject(ObjectInputStream in){}}
+                  public static class C implements Serializable {private void readObject(ObjectInputStream in){}}
+                  public static void read(ObjectInputStream in)throws Exception {in.readObject();}
+                }
+                """));
+        List<JsonObject> reports=new ArrayList<>();
+        for(int budget:List.of(1,4)) {
+            Path output=temp.resolve("alternatives-"+budget);ByteArrayOutputStream errors=new ByteArrayOutputStream();
+            int code=Main.run(new String[]{"--input",classes.toString(),"--jdk-home",System.getProperty("java.home"),"--output",output.toString(),
+                    "--mode","component","--entry","InputCandidates#read(Ljava/io/ObjectInputStream;)V","--no-guidance","--max-alternatives",Integer.toString(budget)},
+                    new PrintStream(OutputStream.nullOutputStream(),true,StandardCharsets.UTF_8),new PrintStream(errors,true,StandardCharsets.UTF_8));
+            assertTrue(code==0 || code==3,errors.toString(StandardCharsets.UTF_8));
+            reports.add(JsonParser.parseString(Files.readString(output.resolve("report.json"))).getAsJsonObject());
+        }
+        assertTrue(reports.get(0).getAsJsonArray("limitations").asList().stream().anyMatch(limit -> limit.getAsString().startsWith("conditional serialized type frontier")));
+        assertFalse(reports.get(1).getAsJsonArray("limitations").asList().stream().anyMatch(limit -> limit.getAsString().startsWith("conditional serialized type frontier")));
+    }
 
     @Test void cliNamesTheEntryLimitWhenTheGlobalWorkBudgetWasNotSpent()throws Exception {
         Path classes=BytecodeFixtures.compile(temp,17,Map.of("BudgetFixture.java","""

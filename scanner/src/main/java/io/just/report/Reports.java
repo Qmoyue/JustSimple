@@ -85,6 +85,7 @@ public final class Reports {
         for (var artifact : result.input().artifacts()) out.append("- ").append(artifact.role()).append(" `").append(escape(artifact.location())).append("`\n");
         out.append("\n");
         for (String limitation : result.limitations()) out.append("- TRUNCATED: ").append(escape(limitation)).append("\n");
+        for (var issue : result.rankingIssues()) out.append("- Ranking guidance incomplete: ").append(escape(issue.detail())).append("\n");
         for (String missing : result.missingClasses()) out.append("- Missing class: `").append(escape(missing)).append("`\n");
         for (String duplicate : result.input().duplicates()) out.append("- Duplicate: ").append(escape(duplicate)).append("\n");
         out.append("\n## Entries\n\n");

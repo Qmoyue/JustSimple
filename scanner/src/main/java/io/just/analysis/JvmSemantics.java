@@ -13,20 +13,39 @@ import java.util.*;
 final class JvmSemantics {
     sealed interface Conversion permits Converted,Rejected {}
     record Converted(Value value) implements Conversion {}
-    sealed interface Check permits Normal,Rejected {}
-    record Normal(List<Gap> gaps) implements Check {}
-    record Rejected(String exception) implements Conversion,Check {}
+    record Possible(String type,String detail) {}
+    sealed interface Check permits Normal,Rejected {List<Possible> possible();}
+    record Normal(List<Gap> gaps,List<Possible> possible) implements Check {}
+    record Rejected(String exception,List<Possible> possible) implements Conversion,Check {
+        Rejected(String exception){this(exception,List.of());}
+    }
     private final Program program;
     JvmSemantics(Program program) {this.program=program;}
+    /** Upper bounds for synchronous exceptions; unknown calls and explicit throws remain unrestricted. */
+    static Optional<List<String>> exceptionFamilies(Action action) {
+        List<String> runtime;
+        if(action instanceof ReadField || action instanceof WriteField)runtime=List.of("java/lang/NullPointerException");
+        else if(action instanceof ReadArray)runtime=List.of("java/lang/NullPointerException","java/lang/IndexOutOfBoundsException");
+        else if(action instanceof WriteArray)runtime=List.of("java/lang/NullPointerException","java/lang/IndexOutOfBoundsException","java/lang/ArrayStoreException");
+        else if(action instanceof NewArray)runtime=List.of("java/lang/NegativeArraySizeException");
+        else if(action instanceof Cast)runtime=List.of("java/lang/ClassCastException");
+        else if(action instanceof Compute compute && compute.opcode()==Opcodes.ARRAYLENGTH)return Optional.of(List.of("java/lang/NullPointerException"));
+        else if(action instanceof Compute compute && Set.of(Opcodes.IDIV,Opcodes.LDIV,Opcodes.IREM,Opcodes.LREM).contains(compute.opcode()))return Optional.of(List.of("java/lang/ArithmeticException"));
+        else return Optional.empty();
+        List<String> families=new ArrayList<>(runtime);families.add("java/lang/Error");return Optional.of(List.copyOf(families));
+    }
     static List<Gap> queryGaps(Site site,Query<?> query) {
         return query.pending().stream().map(i -> new Gap(i.cause()==QueryCause.BUDGET?GapKind.BUDGET:GapKind.MISSING_DEPENDENCY,site,i.detail())).toList();
     }
     Check check(Action action,List<Atom> operands,OptionalInt length) {
-        List<Gap> gaps=new ArrayList<>();
+        return check(action,operands,length,false);
+    }
+    Check check(Action action,List<Atom> operands,OptionalInt length,boolean nonNullReceiver) {
+        List<Gap> gaps=new ArrayList<>();List<Possible> possible=new ArrayList<>();
         if(action instanceof NewArray) {
             if(operands.get(0) instanceof Literal l && l.value() instanceof Number n) {
                 if(n.intValue()<0)return new Rejected("java/lang/NegativeArraySizeException");
-            } else gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"array length must be nonnegative"));
+            } else {gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"array length must be nonnegative"));possible.add(new Possible("java/lang/NegativeArraySizeException","array length may be negative"));}
         }
         boolean field=action instanceof ReadField r && !r.receiver().origins().isEmpty()
                 || action instanceof WriteField w && !w.receiver().origins().isEmpty();
@@ -34,30 +53,32 @@ final class JvmSemantics {
         if(field || array || action instanceof Compute c && c.opcode()==Opcodes.ARRAYLENGTH) {
             Atom receiver=operands.get(0);
             if(receiver instanceof Literal l && l.value()==null)return new Rejected("java/lang/NullPointerException");
-            if(!nonNull(Value.of(receiver)))gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"memory operation requires a nonnull receiver"));
+            if(!nonNullReceiver && !nonNull(Value.of(receiver))) {gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"memory operation requires a nonnull receiver"));possible.add(new Possible("java/lang/NullPointerException","memory operation receiver may be null"));}
             if(array) {
                 int size=receiver instanceof ArrayValue snapshot?snapshot.extent()==ArrayExtent.EXACT?snapshot.elements().size():-1:length.orElse(-1);
-                if(size==0)return new Rejected("java/lang/ArrayIndexOutOfBoundsException");
+                if(size==0)return new Rejected("java/lang/ArrayIndexOutOfBoundsException",List.copyOf(possible));
                 if(operands.get(1) instanceof Literal l && l.value() instanceof Integer index) {
-                    if(index<0 || size>=0 && index>=size)return new Rejected("java/lang/ArrayIndexOutOfBoundsException");
-                    if(size<0)gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"array index must be within the current array length"));
-                } else gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"array index must be within the current array length"));
+                    if(index<0 || size>=0 && index>=size)return new Rejected("java/lang/ArrayIndexOutOfBoundsException",List.copyOf(possible));
+                    if(size<0){gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"array index must be within the current array length"));possible.add(new Possible("java/lang/ArrayIndexOutOfBoundsException","array index may exceed the current length"));}
+                } else {gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"array index must be within the current array length"));possible.add(new Possible("java/lang/ArrayIndexOutOfBoundsException","array index may be out of bounds"));}
                 if(action instanceof WriteArray && receiver instanceof ObjectValue object && object.type().startsWith("[")
                         && (object.type().charAt(1)=='L' || object.type().charAt(1)=='[')) {
                     var match=ValueBindings.compatible(operands.get(2),object.type().substring(1),program,object.loader());
-                    if(match.match()==ValueBindings.Match.INCOMPATIBLE)return new Rejected("java/lang/ArrayStoreException");
+                    if(match.match()==ValueBindings.Match.INCOMPATIBLE)return new Rejected("java/lang/ArrayStoreException",List.copyOf(possible));
                     gaps.addAll(queryGaps(action.site(),new Query<>(Optional.empty(),match.pending())));
-                    if(match.match()==ValueBindings.Match.UNKNOWN || !object.exact())
+                    if(match.match()==ValueBindings.Match.UNKNOWN || !object.exact()) {
                         gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"array store requires a compatible runtime component type"));
+                        possible.add(new Possible("java/lang/ArrayStoreException","array value may be incompatible with the runtime component type"));
+                    }
                 }
             }
         }
         if(action instanceof Compute c && Set.of(Opcodes.IDIV,Opcodes.LDIV,Opcodes.IREM,Opcodes.LREM).contains(c.opcode())) {
             if(operands.get(1) instanceof Literal l && l.value() instanceof Number n) {
                 if(n.longValue()==0)return new Rejected("java/lang/ArithmeticException");
-            } else gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"integer divisor must be nonzero"));
+            } else {gaps.add(new Gap(GapKind.CONTROL_CONDITION,action.site(),"integer divisor must be nonzero"));possible.add(new Possible("java/lang/ArithmeticException","integer divisor may be zero"));}
         }
-        return new Normal(List.copyOf(gaps));
+        return new Normal(List.copyOf(gaps),List.copyOf(possible));
     }
     Conversion cast(Cast cast,Atom atom) {
         ValueBindings.Compatibility match=ValueBindings.compatible(atom,cast.type().startsWith("[")?cast.type():"L"+cast.type()+";",program,program.scope(cast.type(),cast.site().method().loader()));
@@ -129,7 +150,9 @@ final class JvmSemantics {
         if (op==Opcodes.INSTANCEOF) {
             Atom atom=atoms.get(0);
             if (atom instanceof Literal literal && literal.value()==null) return new Literal(0);
-            String type=atom instanceof ObjectValue object && !object.exact()?"":io.just.knowledge.ValueBindings.runtimeType(atom).orElse("");
+            if(atom instanceof ObjectValue object && !object.exact())
+                return new InstanceTest(object,compute.type(),program.scope(compute.type(),compute.site().method().loader()));
+            String type=io.just.knowledge.ValueBindings.runtimeType(atom).orElse("");
             if(type.isEmpty())return new Unknown("instanceof runtime type is unspecified");
             int loader=atom instanceof ObjectValue object?object.loader():0;
             Query<Boolean> match=program.assignable(type,loader,compute.type(),program.scope(compute.type(),compute.site().method().loader()));
@@ -216,6 +239,17 @@ final class JvmSemantics {
             atoms.add(alternatives.iterator().next());
         }
         boolean taken=successor==branch.jumpTarget();
+        if(atoms.size()==1 && atoms.get(0) instanceof InstanceTest test && (operation==Opcodes.IFEQ || operation==Opcodes.IFNE)) {
+            boolean matches=operation==Opcodes.IFNE?taken:!taken;
+            if(!matches || !(test.receiver() instanceof ObjectValue object) || object.exact() || test.type().startsWith("["))return Optional.of(path);
+            Optional<ClassInfo> type=program.type(test.type(),test.loader());
+            if(type.isEmpty() || (type.get().access() & Opcodes.ACC_FINAL)==0)return Optional.of(path);
+            Query<Boolean> compatible=program.assignable(test.type(),test.loader(),object.type(),object.loader());
+            if(compatible.value().equals(Optional.of(false)) && compatible.pending().isEmpty())return Optional.empty();
+            if(!compatible.value().equals(Optional.of(true)) || !compatible.pending().isEmpty())return Optional.of(path);
+            Optional<InputLocation> source=Values.location(object);
+            return source.isEmpty()?Optional.of(path):path.selecting(source.get().at(new RuntimeClass()),new ClassValue("L"+test.type()+";",true,Optional.empty(),test.loader()));
+        }
         Optional<IntegralRange> left=range(atoms.get(0),path),right=atoms.size()>1?range(atoms.get(1),path):Optional.of(new IntegralRange(0,0));
         if(left.isEmpty() || right.isEmpty())return Optional.of(path);
         Optional<Boolean> known=compare(operation,left.get(),right.get());
@@ -297,6 +331,6 @@ final class JvmSemantics {
     }
 
     static boolean nonNull(Value value) {
-        return !value.empty() && value.alternatives().stream().allMatch(v -> v.atom() instanceof ObjectValue object && object.exact() || v.atom() instanceof CollectionView || v.atom() instanceof MapEntryValue || v.atom() instanceof ClassValue || v.atom() instanceof Reflected || v.atom() instanceof ConstructorValue || v.atom() instanceof LambdaValue || v.atom() instanceof ProxyValue || v.atom() instanceof ArrayValue || v.atom() instanceof LoaderValue || v.atom() instanceof MethodHandleValue || v.atom() instanceof MethodTypeValue || v.atom() instanceof LookupValue || v.atom() instanceof HttpServerValue || v.atom() instanceof StringPrefix || v.atom() instanceof StringConcat || v.atom() instanceof Literal literal && literal.value() instanceof String);
+        return !value.empty() && value.alternatives().stream().allMatch(v -> v.atom() instanceof ObjectValue object && object.exact() || v.atom() instanceof CollectionView || v.atom() instanceof MapEntryValue || v.atom() instanceof ClassValue || v.atom() instanceof Reflected || v.atom() instanceof ReflectedField || v.atom() instanceof ConstructorValue || v.atom() instanceof LambdaValue || v.atom() instanceof ProxyValue || v.atom() instanceof ArrayValue || v.atom() instanceof LoaderValue || v.atom() instanceof MethodHandleValue || v.atom() instanceof MethodTypeValue || v.atom() instanceof LookupValue || v.atom() instanceof HttpServerValue || v.atom() instanceof StringPrefix || v.atom() instanceof StringConcat || v.atom() instanceof Literal literal && literal.value() instanceof String);
     }
 }

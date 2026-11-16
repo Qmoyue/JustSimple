@@ -263,5 +263,6 @@ final class SearchRanking {
         Query<List<DefinedType>> query=knowledge.preferredReceivers(call.target(),upper,loader);issues.addAll(query.pending());return query;
     }
     List<Hint> hints(){return List.copyOf(hints);}
+    void note(Collection<QueryIssue> pending){issues.addAll(pending);}
     Set<QueryIssue> issues(){return Set.copyOf(issues);}
 }

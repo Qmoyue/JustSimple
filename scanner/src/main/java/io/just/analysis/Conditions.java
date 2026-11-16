@@ -16,25 +16,32 @@ final class Conditions {
     record Paths(Set<Integer> possible,Set<Integer> ready,boolean unknown) {}
     private final Program program;
     private final Mechanisms mechanisms;
-    private sealed interface Condition permits Unresolved,Operation,Exclusions {}
+    private sealed interface Condition permits Unresolved,Operation,Exclusions,ConditionalBranch {}
     private record Unresolved(Gap gap) implements Condition {}
     private record Exclusions(List<Path> paths,Gap gap) implements Condition {}
+    private record ConditionalBranch(Branch branch,List<Value> inputs,List<Edge> cfg,Gap gap) implements Condition {}
     private record Read(ObjectValue object,Slot slot) {}
     private record Operation(Invocation invocation,List<Gap> gaps,Map<Read,Value> reads) implements Condition {}
     private record CompletionKey(Invocation invocation,Map<Read,Value> reads,int definitions) {}
     private final Map<ChoiceKey,Condition> unresolved=new HashMap<>();
+    private final JvmSemantics jvm;
     private final Map<CompletionKey,Optional<Boolean>> normalChecks=new LinkedHashMap<>();
     private final Map<Selection,Boolean> typeChecks=new LinkedHashMap<>();
-    private int definitions;
-    Conditions(Program program,Mechanisms mechanisms) {this.program=program;this.mechanisms=mechanisms;}
-    void uncertain(ChoiceKey choice,Gap gap) {unresolved.put(choice,new Unresolved(gap));}
+    private int definitions;private long revision;
+    Conditions(Program program,Mechanisms mechanisms) {this.program=program;this.mechanisms=mechanisms;this.jvm=new JvmSemantics(program);}
+    long revision(){return revision;}
+    private void update(ChoiceKey choice,Condition value){if(!Objects.equals(unresolved.put(choice,value),value))revision++;}
+    void uncertain(ChoiceKey choice,Gap gap) {update(choice,new Unresolved(gap));}
+    void branch(ChoiceKey choice,Branch branch,List<Value> inputs,List<Edge> cfg,Gap gap) {
+        update(choice,new ConditionalBranch(branch,List.copyOf(inputs),cfg,gap));
+    }
     void excluding(ChoiceKey choice,List<Path> paths,Gap gap) {
-        unresolved.put(choice,new Exclusions(List.copyOf(paths),new Gap(gap.kind(),gap.site(),gap.detail(),Optional.of(choice))));
+        update(choice,new Exclusions(List.copyOf(paths),new Gap(gap.kind(),gap.site(),gap.detail(),Optional.of(choice))));
     }
     void normal(NormalChoice choice,Invocation invocation,List<Gap> gaps,Mechanisms.Bindings bindings) {
         Map<Read,Value> reads=new LinkedHashMap<>();
         mechanisms.normalCompletion(invocation,(object,slot) -> reads.computeIfAbsent(new Read(object,slot),key -> bindings.read(object,slot)));
-        unresolved.put(choice,new Operation(invocation,gaps.stream().map(g -> new Gap(g.kind(),g.site(),g.detail(),Optional.of(choice))).toList(),Map.copyOf(reads)));
+        update(choice,new Operation(invocation,gaps.stream().map(g -> new Gap(g.kind(),g.site(),g.detail(),Optional.of(choice))).toList(),Map.copyOf(reads)));
     }
     boolean satisfied(Gap gap,Path path) {
         return gap.condition().map(unresolved::get).map(condition ->
@@ -73,6 +80,7 @@ final class Conditions {
     private List<Gap> gaps(ChoiceKey choice,Path path) {
         Condition condition=unresolved.get(choice);
         if(condition instanceof Unresolved value)return List.of(value.gap());
+        if(condition instanceof ConditionalBranch value)return List.of(value.gap());
         if(condition instanceof Exclusions excluded && excluded.paths().stream().anyMatch(previous -> previous.compatible(path)))return List.of(excluded.gap());
         if(condition instanceof Operation operation && !completion(operation,path).equals(Optional.of(true)))return operation.gaps();
         return List.of();
@@ -95,13 +103,21 @@ final class Conditions {
         for(var choice:requirement.choices().entrySet()) {
             Integer selected=actual.choices().get(choice.getKey());
             // A settled choice can be omitted, but an explicit different successor is a contradiction.
-            if(selected!=null ? !selected.equals(choice.getValue()) : !gaps(choice.getKey(),actual).isEmpty())return false;
+            if(selected!=null ? !selected.equals(choice.getValue()) : !gaps(choice.getKey(),actual).isEmpty() && !branchImplied(choice.getKey(),choice.getValue(),actual))return false;
         }
         for(var required:requirement.selections().entrySet()) {
             Selection selected=actual.selections().get(required.getKey());
             if(selected==null || !required.getValue().impliedBy(selected))return false;
         }
         return true;
+    }
+    private boolean branchImplied(ChoiceKey key,int successor,Path actual) {
+        if(!(unresolved.get(key) instanceof ConditionalBranch conditional))return false;
+        List<Integer> targets=conditional.cfg().stream().filter(edge -> edge.from()==conditional.branch().site().instruction() && !edge.exceptional())
+                .map(Edge::to).distinct().toList();
+        if(targets.size()!=2 || !targets.contains(successor))return false;
+        int opposite=targets.get(0)==successor?targets.get(1):targets.get(0);
+        return jvm.assume(conditional.branch(),opposite,conditional.inputs(),actual).isEmpty();
     }
     Paths paths(Facts facts,Map<Integer,Decision> branches) {
         Set<Integer> possible=reachable(facts,branches,false,-1),ready=reachable(facts,branches,true,-1);

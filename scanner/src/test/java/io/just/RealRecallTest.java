@@ -23,6 +23,32 @@ class RealRecallTest {
         }
     }
     private boolean impact(ScanResult result,String name){return result.relations().stream().anyMatch(r -> r.kind()==Kind.IMPACT && r.target().filter(t -> t.name().equals(name)).isPresent());}
+    @Test void constantBase64ClassBytesRetainTheirDefinitionAndIdentity()throws Exception {
+        Path stage=BytecodeFixtures.compile(temp,8,Map.of("EncodedStage.java","public class EncodedStage {public static void run()throws Exception {Runtime.getRuntime().exec(\"encoded-stage\");}}"));
+        String encoded=Base64.getEncoder().encodeToString(java.nio.file.Files.readAllBytes(stage.resolve("EncodedStage.class")));
+        Path root=BytecodeFixtures.compile(temp,8,Map.of("EncodedRoot.java","""
+                public class EncodedRoot extends ClassLoader {
+                  public static void run()throws Exception {
+                    byte[] bytes=java.util.Base64.getDecoder().decode("%s");
+                    Class<?> type=new EncodedRoot().defineClass("EncodedStage",bytes,0,bytes.length);
+                    type.getMethod("run").invoke(null);
+                  }
+                  protected Class<?> findClass(String name){
+                    byte[] bytes=java.util.Base64.getDecoder().decode("%s");
+                    return defineClass(name,bytes,0,bytes.length);
+                  }
+                  public static void delegate()throws Exception {
+                    new EncodedRoot().loadClass("EncodedStage").getMethod("run").invoke(null);
+                  }
+                }
+                """.formatted(encoded,encoded)));
+        ScanResult result=scan(root,"EncodedRoot","run","()V",List.of());
+        assertTrue(impact(result,"defineClass"));
+        assertTrue(result.relations().stream().anyMatch(r -> r.site().method().owner().equals("EncodedStage") && r.target().filter(t -> t.name().equals("exec")).isPresent()),result.limitations().toString());
+        ScanResult delegated=scan(root,"EncodedRoot","delegate","()V",List.of());
+        assertTrue(delegated.relations().stream().anyMatch(r -> r.target().filter(t -> t.owner().equals("EncodedRoot") && t.name().equals("findClass")).isPresent()));
+        assertTrue(delegated.relations().stream().anyMatch(r -> r.site().method().owner().equals("EncodedStage") && r.target().filter(t -> t.name().equals("exec")).isPresent()),delegated.limitations().toString());
+    }
     @Test void classResourceDefinitionContinuesThroughThisClassInitializationAndConstruction()throws Exception {
         Path classes=BytecodeFixtures.compile(temp,17,Map.of("LoaderRoot.java","""
             public class LoaderRoot extends ClassLoader {

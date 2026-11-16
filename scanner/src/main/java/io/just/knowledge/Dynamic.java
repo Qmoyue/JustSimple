@@ -13,6 +13,41 @@ final class Dynamic implements Model {
     private static final String META="(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
     private static final String ALT="(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;";
     private static final String HANDLER="(Ljava/lang/Object;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;";
+    private static final FieldId PROXY_HANDLER=new FieldId("java/lang/reflect/Proxy","h","Ljava/lang/reflect/InvocationHandler;");
+
+    /** A serialized interface value may be a generated proxy as well as a declared implementation. */
+    Optional<Local> serializedProxy(Invocation call,Program program,Guidance guidance,int alternatives) {
+        MethodId api=call.call().target();
+        if(call.call().opcode()!=Opcodes.INVOKEINTERFACE || !(call.receiver() instanceof ObjectValue receiver) || receiver.exact()
+                || receiver.source().filter(source -> source.path().stream().anyMatch(Decoded.class::isInstance)).isEmpty()
+                || program.type(api.owner(),api.loader()).filter(type -> (type.access() & Opcodes.ACC_INTERFACE)!=0).isEmpty()
+                || program.type("java/lang/reflect/Proxy").filter(type -> type.role()==io.just.input.Inputs.Role.PLATFORM).isEmpty())return Optional.empty();
+        Query<Method> member=program.lookup(api);if(member.value().isEmpty())return Optional.empty();
+        MethodId invocation=new MethodId("java/lang/reflect/InvocationHandler","invoke",HANDLER);
+        Query<List<DefinedType>> preferred=guidance.receivers(invocation,"java/lang/reflect/InvocationHandler",0);
+        Query<List<VirtualTarget>> handlers=program.implementations(invocation,"java/lang/reflect/InvocationHandler",0,preferred.value().orElseThrow(),alternatives);
+        MethodId declaration=member.value().orElseThrow().id();
+        List<Atom> types=program.signature(declaration).parameters().stream().map(type -> (Atom)new ClassValue(type.descriptor(),true,Optional.empty(),program.scope(Values.type(type.descriptor()),declaration.loader()))).toList();
+        Atom method=new Reflected(new ClassValue("L"+declaration.owner()+";",true,Optional.empty(),declaration.loader()),new Literal(api.name()),
+                new ArrayValue(call.result().id(),ArrayRole.METHOD_TYPES,"[Ljava/lang/Class;",types),false,call.call().site());
+        Atom arguments=call.arguments().isEmpty()?new Literal(null):new ArrayValue(call.result().id(),ArrayRole.PROXY_ARGUMENTS,"[Ljava/lang/Object;",call.arguments());
+        InputSource source=receiver.source().orElseThrow().at(new SerializedField(PROXY_HANDLER));List<Effect> choices=new ArrayList<>();int index=0;
+        for(VirtualTarget target:handlers.value().orElseThrow())if(target.receiver().isPresent()) {
+            DefinedType type=target.receiver().orElseThrow();
+            Atom handler=new Symbolic(type.name(),"handler of this serialized proxy",Optional.of(source),type.loader());
+            Atom proxy=new ProxyValue(receiver.id(),List.of(new ClassValue("L"+api.owner()+";",true,Optional.empty(),api.loader())),handler,call.call().site(),false);
+            List<Gap> gaps=new ArrayList<>(Mechanisms.queryGaps(call,new Query<>(Optional.empty(),target.pending())));
+            gaps.add(Mechanisms.gap(call,GapKind.INPUT_BINDING,"the serialized interface value must be a proxy whose own handler has this runtime type"));
+            InputNeed need=new InputNeed(receiver,Optional.of(new SerializedField(PROXY_HANDLER)),NeedKind.RECEIVER_TYPE,"L"+type.name()+";",
+                    List.of(new ClassValue("L"+type.name()+";",true,Optional.empty(),type.loader())),"handler restored for this serialized proxy");
+            choices.add(new Alternative(-1-index++,Local.of(new Need(need),new Dispatch(target.method().id(),handler,List.of(proxy,method,arguments),Kind.DYNAMIC_CALL,
+                    Evidence.CONDITIONAL,List.of(call.call().site()),List.copyOf(gaps),ReturnFlow.TO_RESULT,ExceptionFlow.DIRECT))));
+        }
+        if(choices.isEmpty())return Optional.empty();
+        List<QueryIssue> pending=new ArrayList<>(preferred.pending());pending.addAll(handlers.pending());pending.addAll(member.pending());
+        if(!pending.isEmpty())choices.add(new Observe(Kind.DYNAMIC_CALL,"serialized proxy handler frontier",List.of(call.call().site()),Mechanisms.queryGaps(call,new Query<>(Optional.empty(),pending))));
+        return Optional.of(new Local(choices));
+    }
 
     @Override public Optional<Local> apply(Invocation call,Bindings bindings,Program program) {
         if(call.call().target().owner().equals("java/lang/reflect/Proxy") && program.type("java/lang/reflect/Proxy",call.call().target().loader())

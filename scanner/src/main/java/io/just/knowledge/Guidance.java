@@ -9,15 +9,22 @@ import java.util.*;
 final class Guidance {
     private final Program program;
     private final Catalog catalog;
+    private final int metadataLimit,preferenceLimit;
     private final LinkedHashMap<MethodId,Query<List<Hint>>> reached=new LinkedHashMap<>(16,.75f,true);
     private int retainedHints;
     private record Dispatch(MethodId method,String upper,int loader) {}
     private final LinkedHashMap<Dispatch,Query<List<DefinedType>>> preferred=new LinkedHashMap<>();
+    private final Set<QueryIssue> issues=new LinkedHashSet<>();
     private int definitions=-1;
     private boolean enabled=true;
-    Guidance(Program program,Catalog catalog){this.program=program;this.catalog=catalog;}
-    void enabled(boolean value){enabled=value;}
+    Guidance(Program program,Catalog catalog){this(program,catalog,64);}
+    Guidance(Program program,Catalog catalog,int alternatives){this.program=program;this.catalog=catalog;this.metadataLimit=(int)Math.min(Integer.MAX_VALUE,Math.max(2048L,32L*alternatives));this.preferenceLimit=(int)Math.max(1,3L*alternatives/4);}
+    int metadataLimit(){return metadataLimit;}
+    int preferenceLimit(){return preferenceLimit;}
+    void enabled(boolean value){enabled=value;issues.clear();reached.clear();preferred.clear();retainedHints=0;}
     boolean active(){return enabled && !catalog.emptyRelations();}
+    void note(Collection<QueryIssue> pending){issues.addAll(pending);}
+    List<QueryIssue> issues(){return List.copyOf(issues);}
     private void refresh(){if(definitions!=program.definitionCount()){definitions=program.definitionCount();reached.clear();preferred.clear();retainedHints=0;}}
     Query<List<Hint>> local(MethodId method) {
         refresh();Query<List<Hint>> cached=reached.get(method);if(cached!=null)return cached;
@@ -44,28 +51,30 @@ final class Guidance {
         refresh();Dispatch key=new Dispatch(requested,upper,loader);Query<List<DefinedType>> cached=preferred.get(key);if(cached!=null)return cached;
         List<DefinedType> result=new ArrayList<>();List<QueryIssue> pending=new ArrayList<>();int checked=0;
         for(ClassInfo type:program.concreteTypes(upper,loader)) {
-            if(checked++>=2048){pending.add(new QueryIssue(QueryCause.BUDGET,"relation receiver metadata frontier (2048): "+requested));break;}
+            if(checked++>=metadataLimit){pending.add(new QueryIssue(QueryCause.BUDGET,"relation receiver metadata frontier ("+metadataLimit+"): "+requested));break;}
             MethodId candidate=new MethodId(type.name(),requested.name(),requested.descriptor(),type.loader());
             if(program.declared(candidate).filter(Method::hasBody).isEmpty())continue;
-            if(member(candidate)){result.add(new DefinedType(type.name(),type.loader()));if(result.size()>=48){pending.add(new QueryIssue(QueryCause.BUDGET,"relation receiver preference frontier (48): "+requested));break;}}
+            // Preferences change ordering only; ordinary receiver discovery still covers the remainder.
+            if(member(candidate)){result.add(new DefinedType(type.name(),type.loader()));if(result.size()>=preferenceLimit)break;}
         }
-        Query<List<DefinedType>> query=new Query<>(Optional.of(List.copyOf(result)),pending);
+        note(pending);Query<List<DefinedType>> query=new Query<>(Optional.of(List.copyOf(result)),List.of());
         if(preferred.size()>=1024)preferred.remove(preferred.keySet().iterator().next());preferred.put(key,query);return query;
     }
     Query<List<Method>> order(List<Method> methods) {
         if(!enabled || catalog.emptyRelations())return new Query<>(Optional.of(methods),List.of());
         ArrayDeque<Method> ranked=new ArrayDeque<>();Set<MethodId> chosen=new HashSet<>();List<QueryIssue> pending=new ArrayList<>();int examined=0;
         for(Method method:methods) {
-            if(examined++>=2048){pending.add(new QueryIssue(QueryCause.BUDGET,"relation member metadata frontier (2048)"));break;}
-            if(member(method.id())){ranked.add(method);chosen.add(method.id());if(ranked.size()>=48)break;}
+            if(examined++>=metadataLimit){pending.add(new QueryIssue(QueryCause.BUDGET,"relation member metadata frontier ("+metadataLimit+")"));break;}
+            if(member(method.id())){ranked.add(method);chosen.add(method.id());if(ranked.size()>=preferenceLimit)break;}
         }
-        if(ranked.isEmpty())return new Query<>(Optional.of(methods),pending);
+        note(pending);
+        if(ranked.isEmpty())return new Query<>(Optional.of(methods),List.of());
         ArrayDeque<Method> plain=new ArrayDeque<>(methods);List<Method> result=new ArrayList<>();int turn=0;
         while(!plain.isEmpty() || !ranked.isEmpty()) {
             if(!ranked.isEmpty() && (turn++%4==0 || plain.isEmpty()))result.add(ranked.removeFirst());
             else {Method method=plain.removeFirst();if(!chosen.contains(method.id()))result.add(method);}
         }
-        return new Query<>(Optional.of(List.copyOf(result)),pending);
+        return new Query<>(Optional.of(List.copyOf(result)),List.of());
     }
     /** A class's uncalled methods cannot justify preferring a different callback of that class. */
     Query<Boolean> callbacks(Collection<Method> methods) {

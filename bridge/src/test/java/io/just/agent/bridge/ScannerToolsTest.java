@@ -36,4 +36,32 @@ class ScannerToolsTest {
             page.data().getAsJsonArray().forEach(hint -> assertTrue(hint.getAsJsonObject().getAsJsonArray("references").isEmpty()));
         }
     }
+    @Test void scanBudgetsReachSerializedCandidateDiscovery()throws Exception {
+        Path classes=Files.createDirectory(temp.resolve("candidates"));Path source=temp.resolve("Candidates.java");
+        Files.writeString(source,"""
+            import java.io.*;
+            public class Candidates {
+              public static class A implements Serializable {private void readObject(ObjectInputStream in){}}
+              public static class B implements Serializable {private void readObject(ObjectInputStream in){}}
+              public static class C implements Serializable {private void readObject(ObjectInputStream in){}}
+              public static Object run(ObjectInputStream in)throws Exception {return in.readObject();}
+            }
+            """);
+        assertEquals(0,ToolProvider.getSystemJavaCompiler().run(null,null,null,"-encoding","UTF-8","--release","8","-d",classes.toString(),source.toString()));
+        var config=new ScannerTools.Config(classes.toString(),System.getProperty("java.home"),List.of(),null,
+                temp.resolve("budget-results").toString(),20000,8,20_000_000,2,Inputs.Limits.defaults(),Analyzer.Limits.defaults());
+        try(ScannerTools tools=new ScannerTools(config)) {
+            for(int alternatives:List.of(1,4)) {
+                var request=JsonParser.parseString("""
+                    {"knowledge":"none","entries":[{"owner":"Candidates","name":"run","descriptor":"(Ljava/io/ObjectInputStream;)Ljava/lang/Object;"}]}
+                    """).getAsJsonObject();
+                var budgets=new com.google.gson.JsonObject();budgets.addProperty("alternatives",alternatives);request.add("budgets",budgets);
+                var reply=(ScannerTools.Reply)tools.execute("scan_target",request,ignored -> {});
+                var pageRequest=JsonParser.parseString("{\"path\":[\"limitations\"]}").getAsJsonObject();pageRequest.addProperty("resultRef",reply.resultRef());
+                var page=(ResultStore.Page)tools.execute("read_result",pageRequest,ignored -> {});
+                boolean frontier=page.data().getAsJsonArray().asList().stream().anyMatch(item -> item.getAsString().startsWith("conditional serialized type frontier"));
+                assertEquals(alternatives==1,frontier);
+            }
+        }
+    }
 }

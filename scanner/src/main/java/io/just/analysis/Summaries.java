@@ -6,7 +6,7 @@ import io.just.knowledge.Mechanisms.Bindings;
 import io.just.knowledge.Values.*;
 import java.util.*;
 
-/** Relation templates only: straight parameter forwarding or one same-object field read. */
+/** Relation templates for simple returns and one same-object field read. */
 final class Summaries {
     sealed interface Template permits Forward,FieldReturn,ConstantReturn {}
     record Forward(Parameter parameter) implements Template {}

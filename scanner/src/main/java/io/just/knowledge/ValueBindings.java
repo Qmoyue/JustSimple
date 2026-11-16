@@ -16,6 +16,7 @@ public final class ValueBindings {
         if(value instanceof MapEntryValue entry)return List.of(entry.source(),entry.key());
         if(value instanceof LambdaValue lambda)return lambda.captured();
         if(value instanceof ProxyValue proxy)return List.of(proxy.handler());
+        if(value instanceof Reflected method && method.object()>=0)return List.of(new ObjectValue(method.object(),"java/lang/reflect/Method",true,"method metadata",false));
         if(value instanceof ArrayValue array)return array.elements();
         if(value instanceof UnboundValue unbound)return List.of(unbound.original());
         return List.of();
@@ -57,6 +58,7 @@ public final class ValueBindings {
         if (atom instanceof MapEntryValue) return Optional.of("java/util/Map$Entry");
         if (atom instanceof ClassValue) return Optional.of("java/lang/Class");
         if (atom instanceof Reflected) return Optional.of("java/lang/reflect/Method");
+        if (atom instanceof ReflectedField) return Optional.of("java/lang/reflect/Field");
         if (atom instanceof ConstructorValue) return Optional.of("java/lang/reflect/Constructor");
         if(atom instanceof LookupValue)return Optional.of("java/lang/invoke/MethodHandles$Lookup");
         if(atom instanceof MethodTypeValue)return Optional.of("java/lang/invoke/MethodType");
@@ -155,14 +157,14 @@ public final class ValueBindings {
         if (atom instanceof Literal value && value.value()==null)
             return new ArrayBindings(List.of(new ArrayBinding(List.of(),path,List.of(),Set.of())),List.of());
         if (!(atom instanceof ObjectValue object) || !object.type().startsWith("[")) return new ArrayBindings(List.of(),List.of());
-        Set<ArrayBinding> result=new LinkedHashSet<>();Set<Gap> frontier=new LinkedHashSet<>();
+        Set<ArrayBinding> result=new LinkedHashSet<>();Set<Gap> frontier=new LinkedHashSet<>();int limit=bindings.alternatives(),lengthLimit=Math.max(64,limit);
         Value lengths=bindings.read(object,new Length()).under(path);
         if(lengths.empty())lengths=Values.location(object).flatMap(source -> path.selected(source.at(new Length()))).map(value -> Value.of(value,path)).orElse(Value.BOTTOM);
         for (Bound length : lengths.alternatives()) {
-            int remaining=64-result.size();
-            if(remaining==0){frontier.add(new Gap(GapKind.BUDGET,site,"reflective array query frontier (64 tuples)"));break;}
+            int remaining=limit-result.size();
+            if(remaining==0){frontier.add(new Gap(GapKind.BUDGET,site,"reflective array query frontier ("+limit+" tuples)"));break;}
             if (!(length.atom() instanceof Literal number) || !(number.value() instanceof Integer size) || size<0)continue;
-            if(size>64){frontier.add(new Gap(GapKind.BUDGET,site,"reflective array length frontier (64): "+size));continue;}
+            if(size>lengthLimit){frontier.add(new Gap(GapKind.BUDGET,site,"reflective array length frontier ("+lengthLimit+"): "+size));continue;}
             List<ArrayBinding> tuples=List.of(new ArrayBinding(List.of(),length.path(),length.gaps(),length.dependencies()));
             for (int index=0;index<size;index++) {
                 int position=index;
@@ -177,7 +179,7 @@ public final class ValueBindings {
                         contents=Value.of(member,tuple.path()).requiring(List.of(new Gap(GapKind.INPUT_BINDING,site,"array member remains conditional input at slot "+index)));
                     }
                     for (Bound value:contents.alternatives()) {
-                    if(next.size()>=remaining){frontier.add(new Gap(GapKind.BUDGET,site,"reflective array binding frontier (64 total tuples)"));break combinations;}
+                    if(next.size()>=remaining){frontier.add(new Gap(GapKind.BUDGET,site,"reflective array binding frontier ("+limit+" total tuples)"));break combinations;}
                     List<Atom> elements=new ArrayList<>(tuple.elements()); elements.add(value.atom());
                     Set<Gap> gaps=new LinkedHashSet<>(tuple.gaps()); gaps.addAll(value.gaps());
                     Set<Integer> dependencies=new LinkedHashSet<>(tuple.dependencies()); dependencies.addAll(value.dependencies());
@@ -213,7 +215,7 @@ public final class ValueBindings {
             }
             List<ArrayBinding> next=new ArrayList<>();
             combinations:for(ArrayBinding tuple:tuples)for(Bound bound:value.under(tuple.path()).alternatives()) {
-                if(next.size()>=64){frontiers.add(new Observe(Kind.REFLECTION,"primitive argument adaptation frontier",List.of(call.call().site()),List.of(Mechanisms.gap(call,GapKind.BUDGET,"primitive argument adaptation combinations (64)"))));break combinations;}
+                if(next.size()>=bindings.alternatives()){frontiers.add(new Observe(Kind.REFLECTION,"primitive argument adaptation frontier",List.of(call.call().site()),List.of(Mechanisms.gap(call,GapKind.BUDGET,"primitive argument adaptation combinations ("+bindings.alternatives()+")"))));break combinations;}
                 List<Atom> elements=new ArrayList<>(tuple.elements());elements.add(bound.atom());
                 List<Gap> gaps=new ArrayList<>(tuple.gaps());gaps.addAll(bound.gaps());Set<Integer> dependencies=new LinkedHashSet<>(tuple.dependencies());dependencies.addAll(bound.dependencies());
                 next.add(new ArrayBinding(List.copyOf(elements),bound.path(),List.copyOf(gaps),Set.copyOf(dependencies)));

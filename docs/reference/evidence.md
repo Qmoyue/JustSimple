@@ -6,6 +6,8 @@ Scanner 从同一次扫描写出三份文件。打开 `report.md` 可以阅读�
 
 JSON 的 `schemaVersion` 为 `4`。`execution` 表示分析完成或截断，`outcome` 表示本次是否有发现。截断时，CLI 和终端界面会显示首条原因，完整列表见报告的 `limitations`。阅读候选时，同时查看缺失类、分析限制和需要补充的条件。
 
+`rankingIssues` 记录排序提示未能完整生成的原因；候选仍按普通顺序探索，因此它与分析覆盖截断分开报告。
+
 `findings` 保留发现与所选依据，`relations` 记录调用和数据关系，`demandFrontier` 与 `breakpoints` 指向仍待核对的位置。同一关系可以有多组依据（`supports`），每一组都需要 `dependencies` 列出的关系。`proof` 记录发现使用的关系和支持编号。
 
 位置、值和条件等共用 `references` 表，下标只在所属报告有效。指令编号按含标签和调试节点的 ASM 视图计数，可附源码行。非有限浮点值用带类型的 JSON 对象表示，例如 `{"type":"Double","value":"NaN"}`。

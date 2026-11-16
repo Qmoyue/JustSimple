@@ -34,6 +34,9 @@ class DispatchTest {
             var complete = dispatch.within(requested, requested.owner(), 0, scope, new Dispatch.Budget(8, 8));
             assertEquals(scope, complete.value().orElseThrow().targets().stream().map(t -> t.receiver().orElseThrow()).toList());
             assertTrue(complete.pending().isEmpty());
+            var ranked=dispatch.within(requested,requested.owner(),0,scope,List.of(new DefinedType("Receivers$Other",0),scope.get(1)),new Dispatch.Budget(1,8));
+            assertEquals(List.of(scope.get(1)),ranked.value().orElseThrow().targets().stream().map(t -> t.receiver().orElseThrow()).toList());
+            assertEquals(List.of(scope.get(0)),ranked.value().orElseThrow().frontier());
             var other = dispatch.within(requested, requested.owner(), 0, List.of(new DefinedType("Receivers$Other", 0)), new Dispatch.Budget(1, 1));
             assertTrue(other.value().orElseThrow().targets().isEmpty());
             assertTrue(other.pending().isEmpty());
@@ -51,6 +54,10 @@ class DispatchTest {
             assertTrue(missing.pending().stream().anyMatch(issue -> issue.cause() == QueryCause.MISSING_DEPENDENCY));
             assertTrue(program.limitations().stream().noneMatch(detail -> detail.contains("inspection frontier")));
             assertEquals(2, program.implementations(requested, requested.owner(), 0).value().orElseThrow().size());
+            var limited=program.implementations(requested,requested.owner(),0,List.of(),1);
+            assertEquals(1,limited.value().orElseThrow().size());assertTrue(limited.pending().stream().anyMatch(issue -> issue.cause()==QueryCause.BUDGET));
+            var expanded=program.implementations(requested,requested.owner(),0,List.of(),2);
+            assertEquals(2,expanded.value().orElseThrow().size());assertTrue(expanded.pending().isEmpty());
         }
     }
 

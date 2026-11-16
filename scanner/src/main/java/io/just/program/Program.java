@@ -160,7 +160,7 @@ public final class Program {
     private final Map<MethodId,MethodSyntax> methodSyntax=new HashMap<>();
     private final Map<MethodId,Map<Integer,List<Edge>>> outgoing=new HashMap<>();
     private final Map<MethodId, Signature> signatures = new HashMap<>();
-    private record DispatchKey(MethodId method,String upper,int loader,List<DefinedType> preferred) {}
+    private record DispatchKey(MethodId method,String upper,int loader,List<DefinedType> preferred,int targets) {}
     private final LinkedHashMap<DispatchKey,Query<List<VirtualTarget>>> dispatches=new LinkedHashMap<>(16,.75f,true);
     private int dispatchRevision;
     private void invalidateDispatch() { dispatches.clear(); dispatchRevision++; }
@@ -172,7 +172,8 @@ public final class Program {
     private final Set<String> missing = new LinkedHashSet<>();
     private final Set<String> queryLimits = new LinkedHashSet<>();
     private final Map<String,QueryIssue> unavailable=new HashMap<>();
-    private static final int SCAN_INSTRUCTION_LIMIT=500_000;
+    public static final long DEFAULT_SCAN_INSTRUCTION_LIMIT=500_000L;
+    private final long scanInstructionLimit;
     private long analyzedInstructions;
     private record MemberSignature(String name,String descriptor) {}
     private record Syntax(Map<MemberSignature,Map<MethodId,List<Site>>> callers,Map<MemberSignature,Map<FieldId,List<Site>>> writers,
@@ -181,8 +182,13 @@ public final class Program {
     private Optional<Syntax> syntax=Optional.empty();
 
     public Program(Inputs inputs, int instructionLimit) {
+        this(inputs,instructionLimit,DEFAULT_SCAN_INSTRUCTION_LIMIT);
+    }
+    public Program(Inputs inputs,int instructionLimit,long scanInstructionLimit) {
+        if(scanInstructionLimit<1)throw new IllegalArgumentException("scan instruction budget must be positive");
         this.inputs = inputs;
         this.instructionLimit = instructionLimit;
+        this.scanInstructionLimit=scanInstructionLimit;
         for (Inputs.ClassData data : inputs.targetClasses()) {
             Parsed parsed = parse(data);
             classes.put(new ClassId(parsed.info().name(),0), Optional.of(parsed));
@@ -386,6 +392,55 @@ public final class Program {
     public List<FieldInfo> fields(String owner,int loader) {
         return parsed(owner,loader).map(p -> p.node().fields.stream().map(f -> new FieldInfo(new FieldId(owner,f.name,f.desc,p.info().loader()),f.access)).toList()).orElse(List.of());
     }
+    /** Declared fields, or all public fields through the resolved class and interface hierarchy. */
+    public Query<List<FieldInfo>> reflectiveFields(String owner,boolean declared,int loader,int budget) {
+        if(owner.startsWith("[") || PRIMITIVES.contains(owner))return Query.found(List.of());
+        Set<DefinedType> seen=new LinkedHashSet<>();ArrayDeque<DefinedType> pending=new ArrayDeque<>(List.of(new DefinedType(owner,scope(owner,loader))));
+        Map<FieldId,FieldInfo> result=new LinkedHashMap<>();List<QueryIssue> issues=new ArrayList<>();
+        while(!pending.isEmpty() && seen.size()<budget) {
+            DefinedType current=pending.removeFirst();if(!seen.add(current))continue;
+            Query<ClassInfo> definition=definition(current.name(),current.loader());issues.addAll(definition.pending());
+            if(definition.value().isEmpty())continue;
+            ClassInfo type=definition.value().orElseThrow();
+            for(FieldInfo field:fields(type.name(),type.loader()))if(declared || (field.access() & Opcodes.ACC_PUBLIC)!=0)result.putIfAbsent(field.id(),field);
+            if(!declared) {
+                if(type.parent()!=null)pending.addLast(new DefinedType(type.parent(),scope(type.parent(),type.loader())));
+                for(String face:type.interfaces())pending.addLast(new DefinedType(face,scope(face,type.loader())));
+            }
+        }
+        if(!pending.isEmpty())issues.add(queryBudget("field metadata hierarchy budget ("+budget+"): "+owner));
+        return new Query<>(Optional.of(List.copyOf(result.values())),List.copyOf(new LinkedHashSet<>(issues)));
+    }
+    /** Member classes declared by a class, including public superclass members when requested. */
+    public Query<List<DefinedType>> memberClasses(String owner,boolean declared,int loader,int budget) {
+        if(owner.startsWith("[") || PRIMITIVES.contains(owner))return Query.found(List.of());
+        Set<DefinedType> seen=new LinkedHashSet<>(),members=new LinkedHashSet<>();List<QueryIssue> issues=new ArrayList<>();
+        Optional<DefinedType> next=Optional.of(new DefinedType(owner,scope(owner,loader)));
+        while(next.isPresent() && seen.size()<budget) {
+            DefinedType current=next.orElseThrow();
+            if(!seen.add(current)){issues.add(new QueryIssue(QueryCause.MISSING_DEPENDENCY,"cyclic superclass metadata: "+current.name()));next=Optional.empty();break;}
+            Optional<Parsed> found=parsed(current.name(),current.loader());
+            if(found.isEmpty()){issues.add(unavailable(current.name()));break;}
+            Parsed type=found.orElseThrow();
+            for(InnerClassNode member:type.node().innerClasses)if(member.name!=null && current.name().equals(member.outerName)) {
+                if(member.innerName==null){issues.add(new QueryIssue(QueryCause.MISSING_DEPENDENCY,"unnamed member class metadata: "+member.name));continue;}
+                int scope=scope(member.name,type.info().loader());DefinedType selected=new DefinedType(member.name,scope);
+                if(scope!=type.info().loader())issues.add(new QueryIssue(QueryCause.MISSING_DEPENDENCY,"member class loader differs from its enclosing class: "+member.name));
+                Optional<Parsed> definition=parsed(member.name,scope);
+                if(definition.isEmpty()){issues.add(unavailable(member.name));continue;}
+                Optional<InnerClassNode> own=definition.get().node().innerClasses.stream().filter(entry -> member.name.equals(entry.name)
+                        && Objects.equals(member.outerName,entry.outerName) && Objects.equals(member.innerName,entry.innerName)).findFirst();
+                if(own.isEmpty() || own.get().access!=member.access)issues.add(new QueryIssue(QueryCause.MISSING_DEPENDENCY,"inconsistent member class metadata: "+member.name));
+                if(!declared && own.isPresent() && (own.get().access & Opcodes.ACC_PUBLIC)==0)continue;
+                if(!members.contains(selected) && members.size()>=budget){issues.add(queryBudget("member class metadata budget ("+budget+"): "+owner));break;}
+                if(!members.add(selected))issues.add(new QueryIssue(QueryCause.MISSING_DEPENDENCY,"repeated member class metadata: "+member.name));
+            }
+            if(declared || type.info().parent()==null || (type.info().access() & Opcodes.ACC_INTERFACE)!=0)next=Optional.empty();
+            else next=Optional.of(new DefinedType(type.info().parent(),scope(type.info().parent(),type.info().loader())));
+        }
+        if(next.isPresent() && seen.size()>=budget)issues.add(queryBudget("member class hierarchy budget ("+budget+"): "+owner));
+        return new Query<>(Optional.of(List.copyOf(members)),List.copyOf(new LinkedHashSet<>(issues)));
+    }
     public int instructionLimit() { return instructionLimit; }
     public List<String> limitations() {
         return queryLimits.stream().sorted().toList();
@@ -509,11 +564,15 @@ public final class Program {
     /** Preferences guide body-backed scanner expansion; they are not dispatch evidence. */
     public Query<List<VirtualTarget>> implementations(MethodId requested, String upper, int loader,
                                                        List<DefinedType> preferred) {
-        DispatchKey key = new DispatchKey(requested, upper, loader, List.copyOf(preferred));
+        return implementations(requested,upper,loader,preferred,64);
+    }
+    public Query<List<VirtualTarget>> implementations(MethodId requested,String upper,int loader,List<DefinedType> preferred,int targets) {
+        if(targets<1)throw new IllegalArgumentException("dispatch target budget must be positive");
+        DispatchKey key = new DispatchKey(requested, upper, loader, List.copyOf(preferred),targets);
         Query<List<VirtualTarget>> cached = dispatches.get(key);
         if (cached != null) return cached;
         int revision = dispatchRevision;
-        Query<List<VirtualTarget>> selected = new Dispatch(this).discover(requested, upper, loader, preferred);
+        Query<List<VirtualTarget>> selected = new Dispatch(this).discover(requested, upper, loader, preferred,targets);
         for (QueryIssue issue : selected.pending())
             if (issue.cause() == QueryCause.BUDGET) queryBudget(issue.detail());
         if (revision == dispatchRevision) {
@@ -604,6 +663,12 @@ public final class Program {
             Map<Integer,List<Edge>> immutable=new HashMap<>(); edges.forEach((at,value) -> immutable.put(at,List.copyOf(value)));
             return Map.copyOf(immutable);
         });
+    }
+    /** Copy raw opcode identities so bounded static evaluators can reject unmodeled operations. */
+    public int[] opcodes(MethodId id) {
+        MethodNode method=code(id);int[] result=new int[method.instructions.size()];
+        for(int index=0;index<result.length;index++)result[index]=method.instructions.get(index).getOpcode();
+        return result;
     }
 
     /** Metadata candidates, independent of invocation access and of reflection array order. */
@@ -822,7 +887,7 @@ public final class Program {
         if (!method.hasBody()) return new Facts(method, List.of(), List.of(), Map.of(), List.of(new Limitation(CoverageCause.UNSUPPORTED, "native or abstract method body")));
         int count=node.instructions.size();
         String limit=count>instructionLimit?"method instruction budget ("+instructionLimit+"): "+count+" instructions"
-                :analyzedInstructions+count>SCAN_INSTRUCTION_LIMIT?"scan instruction budget ("+SCAN_INSTRUCTION_LIMIT+"): "+analyzedInstructions+" used, "+count+" requested":null;
+                :count>scanInstructionLimit-analyzedInstructions?"scan instruction budget ("+scanInstructionLimit+"): "+analyzedInstructions+" used, "+count+" requested":null;
         if(limit!=null)return new Facts(method,List.of(),List.of(),Map.of(),List.of(new Limitation(CoverageCause.BUDGET,limit)));
         analyzedInstructions+=count;
         return MethodFlow.analyze(method,node,parsed.data().source());

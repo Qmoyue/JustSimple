@@ -15,6 +15,48 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class RankingTest {
     @TempDir Path temp;
+    @Test void preferenceLimitDoesNotDiscardOrdinaryDispatchOrMarkItTruncated()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("Preferred.java","""
+                public class Preferred {
+                  interface Action {void run();}
+                  static class Box {void use(Object value){}}
+                  public static class One implements Action {Box box;public void run(){box.use(this);}}
+                  public static class Two implements Action {Box box;public void run(){box.use(this);}}
+                  public static class Three implements Action {Box box;public void run(){box.use(this);}}
+                  public static class Four implements Action {Box box;public void run(){box.use(this);}}
+                }
+                """));
+        try(Inputs input=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(input,20_000);MethodId requested=new MethodId("Preferred$Action","run","()V");
+            Path reference=ReferenceFixtures.write(temp.resolve("ranking.json"),program,new MethodId("Preferred$One","run","()V"));
+            Mechanisms mechanisms=new Mechanisms(program,Catalog.read(reference),Set.of(),4);
+            var preferred=mechanisms.preferredReceivers(requested,requested.owner(),0);
+            assertEquals(3,preferred.value().orElseThrow().size());assertTrue(preferred.pending().isEmpty());
+            var resolved=program.implementations(requested,requested.owner(),0,preferred.value().orElseThrow(),4);
+            assertEquals(4,resolved.value().orElseThrow().size());assertTrue(resolved.pending().isEmpty());
+        }
+    }
+    @Test void laterDispatchRanksWithinTheProvenReceiverGroup()throws Exception {
+        StringBuilder source=new StringBuilder("""
+                public class GroupRank {
+                  public static class Box {public void use(Object value){}}
+                  public static class Base {public void first(){} public void second(){}}
+                  static void hit(){} static void noise(){}
+                """);
+        for(int i=0;i<12;i++)source.append("public static class Quiet").append(i).append(" extends Base {public void second(){noise();}}");
+        source.append("public static class ZPreferred extends Base {Box box;public void second(){box.use(this);hit();}} public static void scan(Base input){input.first();input.second();}}");
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("GroupRank.java",source.toString()));
+        try(Inputs input=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(input,20_000);MethodId preferred=new MethodId("GroupRank$ZPreferred","second","()V");
+            Path reference=ReferenceFixtures.write(temp.resolve("group-ranking.json"),program,preferred);
+            var result=new Analyzer(program,new Mechanisms(program,Catalog.read(reference),Set.of(),3),new Analyzer.Limits(100,200_000,20,30_000,1000,3))
+                    .scan(EntryPoints.Mode.COMPONENT,true,Set.of(new MethodId("GroupRank","scan","(LGroupRank$Base;)V")));
+            Set<String> reached=new HashSet<>();result.relations().stream().flatMap(relation -> relation.target().stream())
+                    .filter(target -> target.owner().equals("GroupRank")).map(MethodId::name).forEach(reached::add);
+            assertTrue(reached.contains("hit"),"the later call must use its own ranking within the selected receiver group");
+            assertTrue(reached.contains("noise"),"an ordinary receiver must retain a turn");
+        }
+    }
     @Test void tentativeHandoffsGainTimeWithoutStarvingAnOrdinaryEntry()throws Exception {
         StringBuilder source=new StringBuilder("public class Fair {static class Box {void use(Object value){}} static class Input {Box box;} static void valuable(){} static void ordinary(){} static void noise(){} public static void selected(Input in){in.box.use(in);valuable();} public static void holdout(){ordinary();}");
         for(int i=0;i<20;i++)source.append("public static void n").append(i).append("(){noise();noise();noise();noise();}");source.append('}');

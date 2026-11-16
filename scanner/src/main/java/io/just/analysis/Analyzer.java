@@ -43,12 +43,28 @@ public final class Analyzer {
     private record CallBinding(Atom receiver,List<Atom> arguments) { CallBinding {arguments=List.copyOf(arguments);} }
     private record ValueBinding(Atom value,Path path) {}
     private record ReceiverTarget(MethodId method,Optional<DefinedType> receiver) {}
+    private record EvaluationKey(MethodId target,Atom receiver,List<Atom> arguments,Path path,List<Gap> gaps,Set<Integer> dependencies,Evidence evidence,List<Gap> conditions,int definitions) {
+        EvaluationKey {arguments=List.copyOf(arguments);gaps=List.copyOf(gaps);dependencies=Set.copyOf(dependencies);conditions=List.copyOf(conditions);}
+    }
+    private record EvaluationView(Value returned,Value completion) {}
+    private record GroupContext(Atom receiver,Path path,ObjectValue result,int depth,int definitions,List<Gap> conditions) {
+        GroupContext {conditions=List.copyOf(conditions);}
+    }
+    private record PureGroup(RuntimeTypes types,List<Site> witnesses) {PureGroup {witnesses=List.copyOf(witnesses);}}
+    private record DispatchPartition(List<VirtualTarget> ordinary,Optional<PureGroup> pure,boolean omitted,boolean evaluationLimited) {
+        DispatchPartition {ordinary=List.copyOf(ordinary);}
+    }
+    private record ScopedDispatch(MethodId target,String upper,int loader,RuntimeTypes types,List<DefinedType> preferred,int budget,int definitions) {
+        ScopedDispatch {preferred=List.copyOf(preferred);}
+    }
     private record InvocationKey(int parent, Site call, MethodId target, Path path, int iteration, Phase phase, CallBinding binding,List<Integer> effects) {
         InvocationKey(int parent,Site call,MethodId target,Path path){this(parent,call,target,path,-1,new Startup(),new CallBinding(new Literal(null),List.of()),List.of());}
         InvocationKey(int parent,Site call,MethodId target,Path path,int iteration,Phase phase,CallBinding binding){this(parent,call,target,path,iteration,phase,binding,List.of());}
     }
     private record ObjectKey(int context, int instruction, String type, String role, int loader,int iteration, Phase phase,List<Integer> effects) {}
+    private record SymbolicKey(int context,int instruction,Symbolic value,int loader,int iteration,Phase phase,List<Integer> effects) {}
     private record ExternalField(int object, FieldId field) {}
+    private record ExternalElement(int object,Index index) {}
     private record Initialization(int root,String owner,int loader) {}
     private record Registration(int context,Site site,MethodId target,Atom receiver,List<Atom> arguments,Path path,int iteration) {}
     private static final class Activation {
@@ -66,6 +82,7 @@ public final class Analyzer {
         }
     }
     private record Iteration(Loop loop,int index) {}
+    private record CounterFrontier(State state,Loop loop,Site site) {}
     private record Position(int instruction,int iteration) {}
     private record Carried(Value input,Edge loop,Value output) {}
     private record Control(Optional<Iteration> scope,Path path,Conditions.Paths paths,List<Unit> waiting) {}
@@ -103,6 +120,7 @@ public final class Analyzer {
         final List<Unit> units = new ArrayList<>();
         final Map<Integer, Unit> producers = new HashMap<>();
         final List<Loop> loops=new ArrayList<>();
+        final Map<Loop,Boolean> earlyExits=new HashMap<>();
         final Set<Unit> abruptUnits=new LinkedHashSet<>();
         final Map<Integer,Set<Unit>> handlerSources=new HashMap<>();
         final Map<Position,Unit> iterations=new HashMap<>();
@@ -154,6 +172,8 @@ public final class Analyzer {
         List<Integer> effects=List.of();
         final Map<AlternativeScope,Integer> alternativeTurns=new HashMap<>();
         final Map<ReceiverTarget,Integer> virtualSelections=new LinkedHashMap<>();
+        final Map<EvaluationKey,EvaluationView> evaluations=new LinkedHashMap<>();
+        final IdentityHashMap<List<VirtualTarget>,Map<GroupContext,DispatchPartition>> partitions=new IdentityHashMap<>();
         Optional<ModelView> modelView=Optional.empty();Optional<EffectView> effectView=Optional.empty();
         Optional<Consumption> consumption=Optional.empty();
         Unit(State state, Action action) { this.state = state; this.action = action; }
@@ -165,9 +185,12 @@ public final class Analyzer {
     private final JvmSemantics jvm;
     private final CandidateBindings candidateBindings;
     private final List<State> states = new ArrayList<>();
+    private final List<CounterFrontier> counterFrontiers=new ArrayList<>();
     private final Map<InvocationKey, State> contexts = new LinkedHashMap<>();
     private final Map<ObjectKey, ObjectValue> objects = new HashMap<>();
+    private final Map<SymbolicKey,ObjectValue> symbolicObjects=new HashMap<>();
     private final Map<ExternalField, ObjectValue> fields = new HashMap<>();
+    private final Map<ExternalElement,ObjectValue> elements=new HashMap<>();
     private final Map<Initialization,List<State>> initializers=new HashMap<>();
     private final HeapStore heap;
     private record DefinitionOperation(ExecutionPoint point,Path path) {}
@@ -176,11 +199,12 @@ public final class Analyzer {
     private final Conditions conditions;
     private final Map<Cell, Set<Unit>> readers = new HashMap<>();
     private final WorkQueue queue = new WorkQueue();
-    private final Set<Work> pending = new HashSet<>();
     private final Map<DemandKey,Backward> demands=new LinkedHashMap<>();
     private record SourceQuery(MethodId method,Origin origin) {}
     private final Map<SourceQuery,SourceTrace.Plan> sourcePlans=new HashMap<>();
     private final Map<MethodId,Optional<Summaries.Template>> summaries=new HashMap<>();
+    private final BoundedEvaluation evaluation;
+    private final Map<ScopedDispatch,Query<List<VirtualTarget>>> scopedDispatches=new LinkedHashMap<>();
     private final Map<Unit,Set<Backward>> demandReaders=new IdentityHashMap<>();
     private final Map<Cell,Set<Backward>> demandHeapReaders=new HashMap<>();
     private final Map<DemandKey,List<DemandFrontier>> frontiers=new LinkedHashMap<>();
@@ -218,9 +242,10 @@ public final class Analyzer {
         this.conditions=new Conditions(program,knowledge);
         this.ranking=new SearchRanking(knowledge,program);
         this.evidence=new EvidenceGraph(limits.relations(),limits.findings(),limits.alternatives(),conditions);
-        this.requirements=new InputRequirements(Math.min(2048,limits.relations()));
+        this.requirements=new InputRequirements(limits.relations());
         this.heap=new HeapStore(program,conditions,limits.alternatives());
         this.jvm=new JvmSemantics(program);
+        this.evaluation=new BoundedEvaluation(program);
         this.candidateBindings=new CandidateBindings(program);
     }
 
@@ -261,7 +286,7 @@ public final class Analyzer {
         entryCount=entries.size();progress(Stage.KNOWLEDGE);
         Query<List<Hint>> suggested=knowledge.hints(guidance,entries.stream().map(e -> e.method().id()).collect(java.util.stream.Collectors.toSet()));
         List<Hint> hints=suggested.value().orElseThrow();
-        for(QueryIssue issue:suggested.pending())limit("guidance discovery: "+issue.cause()+": "+issue.detail());
+        ranking.note(suggested.pending());
         Set<MethodId> anchors = new HashSet<>();
         for (Hint hint : hints) {
             anchors.add(hint.anchor());
@@ -309,11 +334,19 @@ public final class Analyzer {
         int pendingWork=queue.size()+deferred.size();
         String workFrontier=evidence.size()>=limits.relations()?"relation budget: "+limits.relations():"work item budget: "+limits.steps();
         for(Work work:queue)if(work instanceof Backward query)frontiers.put(query.key,List.of(new DemandFrontier(query.key.context(),query.key.use(),query.key.origin(),query.key.path(),DemandState.BUDGET,List.of(),"backward query pending at "+workFrontier)));
+        Map<State,Map<Loop,Integer>> closed=new IdentityHashMap<>();
+        if(pendingWork==0 && limitations.isEmpty() && program.limitations().isEmpty() && heap.limitations().isEmpty() && evidence.limitations().isEmpty())
+            for(CounterFrontier frontier:counterFrontiers) {
+                OptionalInt exit=closedCounter(frontier.state(),frontier.loop());
+                if(exit.isPresent())closed.computeIfAbsent(frontier.state(),key -> new HashMap<>()).put(frontier.loop(),exit.getAsInt());
+            }
         for (State state : states) {
-            long waiting = state.units.stream().filter(u -> u.progress instanceof Waiting).count();
+            long waiting = state.units.stream().filter(u -> u.progress instanceof Waiting && !pastClosedLoop(u,closed)).count();
             if (waiting > 0 && pendingWork==0)
                 limit("unresolved cyclic/local dependencies in " + state.key.target() + ": " + waiting + " instructions");
         }
+        for(CounterFrontier frontier:counterFrontiers)if(!closed.getOrDefault(frontier.state(),Map.of()).containsKey(frontier.loop()))
+            limit((frontier.loop().extensible()?"finite counter loop budget (":"counter loop prefix (")+frontier.loop().count()+") at "+frontier.site());
         List<Finding> findings = evidence.findings(states.stream().map(state -> new EvidenceGraph.Context(state.key.parent(),state.parentRelation,state.entry,List.copyOf(state.required))).toList());
         List<Relation> relations=evidence.snapshot();List<InputRequirement> needs=requirements.snapshot(conditions::compatible);List<DemandFrontier> demandFrontier=new ArrayList<>(frontiers.values().stream().flatMap(Collection::stream).toList());
         record ProducerQuery(String descriptor,int loader) {}
@@ -331,7 +364,7 @@ public final class Analyzer {
         }
         List<Breakpoint> breakpoints=new ArrayList<>(Breakpoints.locate(relations,needs,demandFrontier));breakpoints.addAll(evidence.coverage());
         for(Work work:queue)if(work instanceof Unit unit)breakpoints.add(new Breakpoint(unit.state.id,unit.action.site(),unit.state.key.path(),Optional.empty(),Optional.empty(),List.of(),GapKind.BUDGET,Optional.empty(),Optional.empty(),"instruction pending at "+workFrontier));
-        for(QueryIssue issue:ranking.issues())if(issue.cause()==QueryCause.BUDGET)limit("ranking discovery: "+issue.detail());
+        Set<QueryIssue> rankingIssues=new LinkedHashSet<>(ranking.issues());rankingIssues.addAll(knowledge.rankingIssues());
         Inputs.Summary input = program.inputSummary();
         limitations.addAll(input.limitations());
         limitations.addAll(program.limitations());
@@ -344,7 +377,7 @@ public final class Analyzer {
                 findings.isEmpty() ? Outcome.NO_FINDINGS : Outcome.FINDINGS, input, data.map(StaticData::summary), limits, program.instructionLimit(), entries, ranking.hints(),
                 relations, findings, reported, program.missingClasses(),
                 new Statistics((System.nanoTime() - started) / 1_000_000, states.size(), steps,
-                        heap.cells(), evidence.size(), findings.size(),backwardQueries,demandGuidance,summaryApplications,refinementWork,combinationReuses,rankingWork,states.stream().filter(state -> state.ranking.rank()!=SearchRanking.Rank.NONE).count(),modelReuses,effectReuses),needs,demandFrontier,List.copyOf(breakpoints));
+                        heap.cells(), evidence.size(), findings.size(),backwardQueries,demandGuidance,summaryApplications,refinementWork,combinationReuses,rankingWork,states.stream().filter(state -> state.ranking.rank()!=SearchRanking.Rank.NONE).count(),modelReuses,effectReuses),needs,demandFrontier,List.copyOf(breakpoints),List.copyOf(rankingIssues));
     }
 
     /** One fair queue: a noisy entry cannot fill the FIFO ahead of every other entry's callees. */
@@ -352,8 +385,9 @@ public final class Analyzer {
         private enum Priority { RANKED, TARGET_MECHANISM, MECHANISM, PARTIAL, ORDINARY }
         private record Root(int id,Priority priority) {}
         private final LinkedHashMap<Root,ArrayDeque<Work>> roots=new LinkedHashMap<>();
+        private final Map<Work,Root> locations=new IdentityHashMap<>();
         private final double[] service=new double[Priority.values().length];
-        private int size;private double floor;
+        private int size;private double floor;private Priority served;
         private Root rootId(Work work){State state=work instanceof Unit unit?unit.state:states.get(((Backward)work).key.context());
             boolean mechanism=state.mechanism || work instanceof Backward && demandGuidance || work instanceof Unit unit && (unit.activation.isPresent() || unit.action instanceof Call call && (Mechanisms.demands(call) || knowledge.isImpact(call.target())));
             SearchRanking.Rank rank=work instanceof Unit unit?rank(unit):((Backward)work).rank;
@@ -367,21 +401,28 @@ public final class Analyzer {
         private ArrayDeque<Work> bucket(Work work) {
             Root id=rootId(work);
             if(roots.keySet().stream().noneMatch(root -> root.priority()==id.priority()))service[id.priority().ordinal()]=Math.max(service[id.priority().ordinal()],floor);
+            if(locations.put(work,id)!=null)throw new IllegalStateException("work already queued");
             return roots.computeIfAbsent(id,key -> new ArrayDeque<>());
         }
         void addLast(Work work){bucket(work).addLast(work);size++;}
         void addFirst(Work work){bucket(work).addFirst(work);size++;}
         Work removeFirst(){
             Root id=roots.keySet().stream().min(Comparator.comparingDouble(root -> service[root.priority().ordinal()])).orElseThrow();
-            ArrayDeque<Work> bucket=roots.remove(id);Work work=bucket.removeFirst();if(!bucket.isEmpty())roots.put(id,bucket);size--;return work;}
-        void consumed(Work work,long cost) {
-            Priority priority=rootId(work).priority();
+            ArrayDeque<Work> bucket=roots.remove(id);Work work=bucket.removeFirst();locations.remove(work);served=id.priority();
+            if(!bucket.isEmpty())roots.put(id,bucket);size--;return work;
+        }
+        void consumed(long cost) {
+            Priority priority=Objects.requireNonNull(served);
             int share=switch(priority){case RANKED -> 24;case TARGET_MECHANISM -> 22;case MECHANISM -> 7;case PARTIAL -> 2;case ORDINARY -> 1;};
             service[priority.ordinal()]+=(double)cost/share;
             floor=roots.keySet().stream().mapToDouble(root -> service[root.priority().ordinal()]).min().orElse(service[priority.ordinal()]);
         }
-        void removeAll(Collection<Work> work){for(Work item:work){Root id=rootId(item);ArrayDeque<Work> bucket=roots.get(id);if(bucket!=null && bucket.remove(item)){size--;if(bucket.isEmpty())roots.remove(id);}}}
-        int size(){return size;}boolean isEmpty(){return size==0;}
+        void removeAll(Collection<Work> work){for(Work item:work){
+            Root id=locations.remove(item);if(id==null)continue;ArrayDeque<Work> bucket=roots.get(id);
+            if(bucket==null || !bucket.remove(item))throw new IllegalStateException("queued work has no bucket");
+            size--;if(bucket.isEmpty())roots.remove(id);
+        }}
+        int size(){return size;}boolean isEmpty(){return size==0;}boolean contains(Work work){return locations.containsKey(work);}
         public Iterator<Work> iterator(){return roots.values().stream().flatMap(Collection::stream).iterator();}
     }
 
@@ -392,15 +433,15 @@ public final class Analyzer {
             int turn=(int)Math.min(Math.min(32,queue.size()),limits.steps()-steps);
             for(int i=0;i<turn && steps<limits.steps() && evidence.size()<limits.relations();i++) {
                 if(Thread.currentThread().isInterrupted())throw new CancellationException("scan interrupted");
-                Work work=queue.removeFirst();pending.remove(work);steps++;
+                Work work=queue.removeFirst();steps++;
                 boolean ranked=(work instanceof Unit unit?rank(unit):((Backward)work).rank)!=SearchRanking.Rank.NONE;
                 long consumed=steps;
                 if(work instanceof Unit unit)execute(unit);else backward((Backward)work);
-                long cost=steps-consumed+1;queue.consumed(work,cost);
+                long cost=steps-consumed+1;queue.consumed(cost);
                 if(ranked)rankingWork+=cost;
             }
             if(demandGuidance && !urgent.isEmpty()) {
-                List<Work> prioritized=urgent.stream().filter(pending::contains).toList();
+                List<Work> prioritized=urgent.stream().filter(queue::contains).toList();
                 queue.removeAll(prioritized);for(int i=prioritized.size()-1;i>=0;i--)queue.addFirst(prioritized.get(i));urgent.clear();
             }
             progress(Stage.ANALYSIS);
@@ -409,15 +450,23 @@ public final class Analyzer {
 
     private Optional<Local> model(Unit unit,Invocation invocation) {
         Invocation bound=CandidateBindings.project(invocation,invocation.path());
-        if(unit.consumption.isPresent())return knowledge.apply(bound,(object,slot) -> read(unit,object,slot));
+        if(unit.consumption.isPresent())return knowledge.apply(bound,bindings(unit,null));
         if(unit.modelView.filter(view -> view.definitions()==program.definitionCount() && view.invocation().equals(bound) && unchanged(unit,view.reads())).isPresent()) {
             modelReuses++;return unit.modelView.orElseThrow().local();
         }
         Map<HeapQuery,Value> reads=new LinkedHashMap<>();
-        Optional<Local> local=knowledge.apply(bound,(object,slot) -> {
-            Value value=read(unit,object,slot);reads.put(new HeapQuery(object,slot,use(unit,slot instanceof ResolvedObject)),value);return value;
-        });
+        Optional<Local> local=knowledge.apply(bound,bindings(unit,reads));
         unit.modelView=Optional.of(new ModelView(bound,local,Map.copyOf(reads),program.definitionCount()));return local;
+    }
+    private Mechanisms.Bindings bindings(Unit unit,Map<HeapQuery,Value> reads) {
+        return new Mechanisms.Bindings() {
+            @Override public Value read(ObjectValue object,Slot slot) {
+                Value value=Analyzer.this.read(unit,object,slot);
+                if(reads!=null)reads.put(new HeapQuery(object,slot,use(unit,slot instanceof ResolvedObject)),value);
+                return value;
+            }
+            @Override public Optional<ObjectValue> materialize(Symbolic value){return Optional.of(symbolic(unit,value));}
+        };
     }
     private HeapStore.Use use(Unit unit,boolean ownWrites) {
         Path path=unit.executionPath.orElse(unit.state.key.path());return new HeapStore.Use(writer(unit),unit.action.site(),path,unit.state.facts.cfg(),ownWrites);
@@ -522,7 +571,7 @@ public final class Analyzer {
         }
         if (state.units.isEmpty()) state.returned = Value.of(new Unknown("method body unavailable")).requiring(List.copyOf(state.required));
         if(state.key.parent()>=0) {
-            List<Work> ready=state.units.stream().filter(pending::contains).map(unit -> (Work)unit).toList();
+            List<Work> ready=state.units.stream().filter(queue::contains).map(unit -> (Work)unit).toList();
             queue.removeAll(ready);for(int i=ready.size()-1;i>=0;i--)queue.addFirst(ready.get(i));
         }
     }
@@ -558,6 +607,12 @@ public final class Analyzer {
 
     private int iteration(Unit unit) { return unit.iteration.map(Iteration::index).orElse(-1); }
     private Optional<Loop> loop(State state,int instruction) { return state.loops.stream().filter(l -> l.start()<=instruction && instruction<=l.end()).findFirst(); }
+    private boolean mayExitEarly(State state,Loop loop) {
+        return loop.prefix() || state.earlyExits.computeIfAbsent(loop,plan -> state.facts.cfg().stream().anyMatch(edge -> edge.exceptional()
+                && plan.start()<=edge.from() && edge.from()<=plan.end() && (edge.to()<plan.start() || edge.to()>plan.end()))
+                || state.facts.cfg().stream().filter(edge -> !edge.exceptional() && plan.start()<=edge.from() && edge.from()<=plan.end()
+                        && (edge.to()<plan.start() || edge.to()>plan.end())).map(Edge::from).distinct().limit(2).count()>1);
+    }
     private Unit producer(Unit consumer,int instruction,boolean carried) {
         Optional<Loop> scope=loop(consumer.state,instruction);
         if (scope.isEmpty()) return consumer.state.producers.get(instruction);
@@ -602,6 +657,34 @@ public final class Analyzer {
         return OptionalInt.empty();
     }
 
+    /** Only close a scalar loop after a finished iteration makes its backedge unreachable. */
+    private OptionalInt closedCounter(State state,Loop plan) {
+        if(state.facts.actions().stream().filter(action -> plan.start()<=action.site().instruction() && action.site().instruction()<=plan.end())
+                .anyMatch(action -> !(action instanceof Constant || action instanceof Assign || action instanceof Compute || action instanceof Branch)))return OptionalInt.empty();
+        for(int index=0;index<plan.count();index++) {
+            int current=index;
+            if(state.units.stream().anyMatch(unit -> unit.iteration.filter(i -> i.loop().equals(plan) && i.index()<=current).isPresent() && unit.progress instanceof Waiting))continue;
+            Map<Integer,Conditions.Decision> decisions=new HashMap<>();
+            for(Unit unit:state.units)if(unit.iteration.filter(i -> i.loop().equals(plan) && i.index()==current).isPresent()
+                    && unit.action instanceof Branch branch && unit.progress instanceof Finished done && !done.value().empty()) {
+                List<Bound> values=List.copyOf(done.value().alternatives());
+                if(values.stream().anyMatch(value -> !(value.atom() instanceof Literal literal && literal.value() instanceof Boolean)
+                        || value.gaps().stream().anyMatch(gap -> gap.kind()==GapKind.BUDGET || gap.kind()==GapKind.UNSUPPORTED)))continue;
+                Set<Boolean> choices=new HashSet<>();for(Bound value:values)choices.add((Boolean)((Literal)value.atom()).value());
+                List<Integer> targets=state.facts.cfg().stream().filter(edge -> edge.from()==branch.site().instruction() && !edge.exceptional()).map(Edge::to).distinct().toList();
+                if(choices.size()!=1 || targets.size()!=2 || !targets.contains(branch.jumpTarget()))continue;
+                int target=choices.iterator().next()?branch.jumpTarget():targets.stream().filter(to -> to!=branch.jumpTarget()).findFirst().orElseThrow();
+                decisions.put(branch.site().instruction(),new Conditions.Taken(target));
+            }
+            if(!conditions.reachable(state.facts,decisions,false,-1,plan.start()).contains(plan.end()))return OptionalInt.of(index);
+        }
+        return OptionalInt.empty();
+    }
+    private boolean pastClosedLoop(Unit unit,Map<State,Map<Loop,Integer>> closed) {
+        return unit.iteration.map(i -> closed.getOrDefault(unit.state,Map.of()).get(i.loop()))
+                .filter(last -> iteration(unit)>last).isPresent();
+    }
+
     private void orderedLoop(Unit iterator,ObjectValue receiver) {
         State state=iterator.state;
         Value lengths=read(iterator,receiver,new Length(),true);
@@ -609,27 +692,28 @@ public final class Analyzer {
         for (Bound bound:lengths.alternatives()) if (bound.atom() instanceof Literal value && value.value() instanceof Integer size) sizes.add(size);
         if (sizes.size()!=1) {
             if(receiver.source().isPresent())Iterations.plan(state.facts,iterator.action.site().instruction(),receiver.id(),Math.min(8,limits.alternatives()),state.loops).ifPresent(plan -> {
-                limit("symbolic iterator prefix ("+plan.count()+") at "+iterator.action.site());instantiate(iterator,plan.asPrefix(),iterator);
+                limit("symbolic iterator prefix ("+plan.count()+") at "+iterator.action.site());instantiate(iterator,plan.asPrefix(false),iterator);
             });
             return;
         }
         int count=sizes.iterator().next();
         int available=0;
-        if(count>=0)while(available<Math.min(count,64) && !read(iterator,receiver,new Index(available),true).empty())available++;
+        if(count>=0)while(available<Math.min(count,limits.alternatives()) && !read(iterator,receiver,new Index(available),true).empty())available++;
         if(available==0 && count>0)return; // Unordered summaries continue through the generic loop.
         boolean prefix=available<count;
-        if(prefix){limit("iterator member prefix ("+available+") at "+iterator.action.site());count=available;}
+        boolean budgetPrefix=prefix && available==limits.alternatives();
+        if(prefix){limit((budgetPrefix?"finite iterator budget (":"iterator member prefix (")+available+") at "+iterator.action.site());count=available;}
 
         Optional<Loop> candidate=Iterations.plan(state.facts,iterator.action.site().instruction(),receiver.id(),count,state.loops);
         if(candidate.isPresent()) {
             Loop plan=candidate.get();
-            if(count<0 || count>64) {limit("finite iteration budget (64) at "+iterator.action.site());return;}
-            instantiate(iterator,prefix?plan.asPrefix():plan,iterator);
+            if(count<0) {limit("finite iteration budget ("+limits.alternatives()+") at "+iterator.action.site());return;}
+            instantiate(iterator,prefix?plan.asPrefix(budgetPrefix):plan,iterator);
         }
     }
     private void instantiate(Unit iterator,Loop plan,Unit initialEffect) {
             State state=iterator.state;int count=plan.count();
-            if(plan.prefix())for(Unit after:state.units)if(after.action.site().instruction()>plan.end())after.prerequisites.add(new Gap(GapKind.BUDGET,iterator.action.site(),"loop exit lies beyond the symbolic iterator prefix"));
+            if(plan.prefix())for(Unit after:state.units)if(after.action.site().instruction()>plan.end())after.prerequisites.add(new Gap(GapKind.BUDGET,iterator.action.site(),"loop exit lies beyond the analyzed prefix"));
             List<Unit> body=state.units.stream().filter(u -> plan.start()<=u.action.site().instruction() && u.action.site().instruction()<=plan.end()).toList();
             state.loops.add(plan);
             Unit previous=initialEffect;
@@ -650,7 +734,7 @@ public final class Analyzer {
             }
     }
 
-    private void offer(Work work) {if(pending.add(work))queue.addLast(work);}
+    private void offer(Work work) {if(!queue.contains(work))queue.addLast(work);}
 
     private void demand(State state,Site use,Origin origin,Path path,int iteration,int depth) {
         demand(state,use,origin,path,iteration,depth,SearchRanking.Rank.NONE);
@@ -830,43 +914,29 @@ public final class Analyzer {
                 value=state.parameters.getOrDefault(parameter.slot(),Value.BOTTOM);
             }
             else if (origin instanceof Producer producer) {
+                boolean earlierExit=false;
                 Optional<Loop> carriedLoop=consumer.iteration.map(Iteration::loop);
                 if (carriedLoop.isPresent() && iteration(consumer)>0 && producer.instruction()<carriedLoop.get().start()
                         && sources.origins().stream().anyMatch(o -> o instanceof Producer p && p.instruction()>=consumer.action.site().instruction()
                             && p.instruction()<=carriedLoop.get().end())) continue;
                 if (consumer.iteration.isEmpty()) {
-                    boolean fromExecutedLoop=sources.origins().stream().anyMatch(o -> o instanceof Producer p && loop(state,p.instruction()).filter(l -> l.count()>0 && consumer.action.site().instruction()>l.end()).isPresent());
-                    if (fromExecutedLoop && loop(state,producer.instruction()).isEmpty()) {
-                        Optional<Loop> previousLoop=state.loops.stream().filter(l -> l.end()<consumer.action.site().instruction()).max(Comparator.comparingInt(Loop::end));
-                        if (previousLoop.isPresent() && producer.instruction()<previousLoop.get().start()
+                    Optional<Loop> previousLoop=sources.origins().stream().filter(Producer.class::isInstance).map(Producer.class::cast)
+                            .flatMap(p -> loop(state,p.instruction()).stream()).filter(l -> l.count()>0 && l.end()<consumer.action.site().instruction())
+                            .max(Comparator.comparingInt(Loop::end));
+                    if (previousLoop.isPresent() && loop(state,producer.instruction()).isEmpty()) {
+                        if (previousLoop.isPresent() && !mayExitEarly(state,previousLoop.get()) && producer.instruction()<previousLoop.get().start()
                                 && state.facts.actions().stream().noneMatch(a -> a instanceof Branch && a.site().instruction()>previousLoop.get().end() && a.site().instruction()<consumer.action.site().instruction())) continue;
+                        earlierExit=previousLoop.filter(l -> mayExitEarly(state,l) && producer.instruction()<l.start()).isPresent();
                     }
                 }
-                Unit unit = producer(consumer,producer.instruction(),true);
-                value = unit != null && unit.progress instanceof Finished complete ? complete.value() : Value.BOTTOM;
-                if (!value.empty() && consumer.iteration.isEmpty() && producer.instruction() >= consumer.action.site().instruction()) {
-                    Optional<Edge> loop = state.facts.cfg().stream().filter(e -> !e.exceptional()
-                            && e.to() <= consumer.action.site().instruction() && e.from() >= producer.instruction()).findFirst();
-                    if (loop.isPresent()) value = acrossIterations(consumer,value,loop.get());
-                }
-                if (unit!=null) {
-                    Set<Bound> selected=new LinkedHashSet<>();
-                    Map<Atom,Integer> elements=new LinkedHashMap<>();
-                    ObjectChoice choice=new ObjectChoice(state.id,producer.instruction(),iteration(unit));
-                    if (value.alternatives().stream().map(Bound::atom).distinct().limit(2).count()>1)
-                        conditions.uncertain(choice,new Gap(GapKind.CONTROL_CONDITION,unit.action.site(),"object selection among multiple possible values at this producer"));
-                    if(value.alternatives().stream().filter(b -> b.atom() instanceof Reflected).map(Bound::atom).distinct().limit(2).count()>1)
-                        conditions.uncertain(new ElementChoice(state.id,producer.instruction(),iteration(unit)),new Gap(GapKind.CONTROL_CONDITION,unit.action.site(),"metadata element selection is conditional"));
-                    for (Bound bound:value.alternatives()) {
-                        if (bound.atom() instanceof ObjectValue object)
-                            bound.path().with(choice,object.id()).ifPresent(p -> selected.add(new Bound(object,p,bound.gaps(),bound.dependencies())));
-                        else if(bound.atom() instanceof Reflected) {
-                            int position=elements.computeIfAbsent(bound.atom(),k -> elements.size());
-                            bound.path().with(new ElementChoice(state.id,producer.instruction(),iteration(unit)),position).ifPresent(p -> selected.add(new Bound(bound.atom(),p,bound.gaps(),bound.dependencies())));
-                        } else selected.add(bound);
-                    }
-                    value=new Value(selected);
-                }
+                Optional<Loop> previous=loop(state,producer.instruction()).filter(l -> mayExitEarly(state,l) && consumer.iteration.isEmpty() && consumer.action.site().instruction()>l.end());
+                if(previous.isPresent()) {
+                    value=Value.BOTTOM;
+                    for(int index=0;index<previous.get().count();index++)
+                        value=merge(consumer,value,produced(consumer,state.iterations.get(new Position(producer.instruction(),index)),producer.instruction()));
+                    earlierExit=true;
+                } else value=produced(consumer,producer(consumer,producer.instruction(),true),producer.instruction());
+                if(earlierExit && !value.empty())value=value.requiring(List.of(new Gap(GapKind.CONTROL_CONDITION,consumer.action.site(),"value may come from an earlier loop exit")));
             } else if (origin instanceof ExceptionOrigin exception) {
                 value=caught(state,exception.handler()).values();
             } else if (origin instanceof LimitedOrigin) {
@@ -877,6 +947,30 @@ public final class Analyzer {
             result = bounded(result.merge(value), state.key.call());
         }
         return result;
+    }
+
+    private Value produced(Unit consumer,Unit unit,int instruction) {
+        if(unit==null || !(unit.progress instanceof Finished complete))return Value.BOTTOM;
+        Value value=complete.value();State state=consumer.state;
+        if (!value.empty() && consumer.iteration.isEmpty() && instruction>=consumer.action.site().instruction()) {
+            Optional<Edge> loop=state.facts.cfg().stream().filter(e -> !e.exceptional() && e.to()<=consumer.action.site().instruction() && e.from()>=instruction).findFirst();
+            if(loop.isPresent())value=acrossIterations(consumer,value,loop.get());
+        }
+        Set<Bound> selected=new LinkedHashSet<>();Map<Atom,Integer> elements=new LinkedHashMap<>();
+        ObjectChoice choice=new ObjectChoice(state.id,instruction,iteration(unit));
+        if(value.alternatives().stream().map(Bound::atom).distinct().limit(2).count()>1)
+            conditions.uncertain(choice,new Gap(GapKind.CONTROL_CONDITION,unit.action.site(),"object selection among multiple possible values at this producer"));
+        if(value.alternatives().stream().filter(b -> b.atom() instanceof Reflected || b.atom() instanceof ReflectedField).map(Bound::atom).distinct().limit(2).count()>1)
+            conditions.uncertain(new ElementChoice(state.id,instruction,iteration(unit)),new Gap(GapKind.CONTROL_CONDITION,unit.action.site(),"metadata element selection is conditional"));
+        for(Bound bound:value.alternatives()) {
+            if(bound.atom() instanceof ObjectValue object)
+                bound.path().with(choice,object.id()).ifPresent(p -> selected.add(new Bound(object,p,bound.gaps(),bound.dependencies())));
+            else if(bound.atom() instanceof Reflected || bound.atom() instanceof ReflectedField) {
+                int position=elements.computeIfAbsent(bound.atom(),k -> elements.size());
+                bound.path().with(new ElementChoice(state.id,instruction,iteration(unit)),position).ifPresent(p -> selected.add(new Bound(bound.atom(),p,bound.gaps(),bound.dependencies())));
+            } else selected.add(bound);
+        }
+        return new Value(selected);
     }
 
     private Value acrossIterations(Unit consumer,Value value,Edge loop) {
@@ -961,8 +1055,12 @@ public final class Analyzer {
                 && source.progress instanceof Finished done && done.value().empty() && uncaught(source)
                 && source.thrown.alternatives().stream().allMatch(v -> v.path().choices().entrySet().stream().allMatch(c -> Objects.equals(unit.state.key.path().choices().get(c.getKey()),c.getValue()) || !conditions.uncertain(c.getKey())))
                 && dominates(unit.state,source.action.site().instruction(),unit.action.site().instruction())) return new ImpossibleGuard();
-        for (Guard guard : unit.state.facts.guards().getOrDefault(unit.action.site().instruction(), List.of())) {
+        List<Guard> guards=unit.state.facts.guards().getOrDefault(unit.action.site().instruction(),List.of());
+        for (Guard guard : guards) {
             if(guard.kind()==GuardKind.UNREACHABLE)return new ImpossibleGuard();
+            // A handler may be reached by any analyzed iteration, not just the loop's exit iteration.
+            // Its exception witness below retains the branch choices of the actual throwing path.
+            if(handlerLoopGuard(unit,guard))continue;
             Optional<Iteration> scope=unit.iteration.filter(i -> i.loop().start()<=guard.branch() && guard.branch()<=i.loop().end());
             BranchKey key=guard.kind()==GuardKind.BRANCH?branchKey(unit.state,guard.branch(),scope):new BranchKey(unit.state.id,guard.branch(),scope.map(Iteration::index).orElse(-1));
             if (guard.kind()==GuardKind.HANDLER) {
@@ -993,13 +1091,14 @@ public final class Analyzer {
             Unit branchUnit = producer(unit,guard.branch(),false);
             if (branchUnit == null || !(branchUnit.action instanceof Branch branch)) continue;
             if (branchUnit.progress instanceof Waiting) return new PendingGuard();
-            Optional<Integer> taken = successor(branchUnit,branch);
+            List<Value> inputs=branch.inputs().stream().map(input -> resolve(branchUnit,input)).toList();
+            Optional<Integer> taken = jvm.successor(branch,inputs,unit.state.facts.cfg());
             if (taken.isPresent() && taken.get()!=guard.successor()) return new ImpossibleGuard();
-            if (taken.isEmpty()) conditions.uncertain(key, new Gap(GapKind.CONTROL_CONDITION, branch.site(), "branch outcome depends on unspecified or unsupported values"));
+            if (taken.isEmpty()) conditions.branch(key,branch,inputs,unit.state.facts.cfg(),new Gap(GapKind.CONTROL_CONDITION,branch.site(),"branch outcome depends on unspecified or unsupported values"));
             Optional<Path> merged = path.with(key, guard.successor());
             if (merged.isEmpty()) return new ImpossibleGuard();
             path = merged.get();
-            Optional<Path> refined=jvm.assume(branch,guard.successor(),branch.inputs().stream().map(input -> resolve(branchUnit,input)).toList(),path);
+            Optional<Path> refined=jvm.assume(branch,guard.successor(),inputs,path);
             if(refined.isEmpty())return new ImpossibleGuard();path=refined.get();
             Value outcomes=((Finished)branchUnit.progress).value().under(path);
             if(outcomes.empty())return new ImpossibleGuard();
@@ -1029,6 +1128,17 @@ public final class Analyzer {
         for (Bound bound:witnesses.alternatives()) {
             unit.prerequisites.addAll(bound.gaps());unit.controlDependencies.addAll(bound.dependencies());
         }
+    }
+    private Path normalPath(Unit unit,Path path,Value outputs) {
+        if(outputs.empty())return path;
+        Map<ChoiceKey,Integer> first=outputs.alternatives().iterator().next().path().choices();
+        for(var choice:first.entrySet())if((choice.getKey() instanceof NormalChoice
+                || choice.getKey() instanceof BranchKey branch && unit.iteration.isPresent()
+                    && branch.context()==unit.state.id
+                    && loop(unit.state,branch.instruction()).filter(unit.iteration.get().loop()::equals).isPresent())
+                && outputs.alternatives().stream().allMatch(output -> Objects.equals(output.path().choices().get(choice.getKey()),choice.getValue())))
+            path=path.with(choice.getKey(),choice.getValue()).orElseThrow();
+        return path;
     }
 
     private void demandControl(Unit unit) {
@@ -1072,23 +1182,46 @@ public final class Analyzer {
                 if(!match.value().equals(Optional.of(false)) || !match.pending().isEmpty())
                     values=values.merge(new Value(Set.of(value)).requiring(JvmSemantics.queryGaps(source.action.site(),match)));
             }
-            if (source.thrown.empty() && !safe(source)) values=values.merge(Value.of(object(state,-target-3,handler.type(),"possible exception handler value",false))
-                    .requiring(List.of(new Gap(GapKind.CONTROL_CONDITION,source.action.site(),"operation may transfer to exception handler"))));
+            if (source.thrown.empty() && !safe(source)) {
+                Query<Boolean> possible=mayCatch(source.action,handler.type());
+                if(!possible.value().equals(Optional.of(false)) || !possible.pending().isEmpty()) {
+                    List<Gap> gaps=new ArrayList<>(JvmSemantics.queryGaps(source.action.site(),possible));
+                    gaps.add(new Gap(GapKind.CONTROL_CONDITION,source.action.site(),"operation may transfer to exception handler"));
+                    values=values.merge(Value.of(object(state,-target-3,handler.type(),"possible exception handler value",false)).requiring(gaps));
+                }
+            }
         }
         return new CatchFlow(values,pending);
+    }
+    private Query<Boolean> mayCatch(Action action,String handler) {
+        Optional<List<String>> families=JvmSemantics.exceptionFamilies(action);
+        if(families.isEmpty())return new Query<>(Optional.of(true),List.of());
+        List<QueryIssue> pending=new ArrayList<>();boolean unknown=false;
+        for(String family:families.get()) {
+            Query<Boolean> thrown=program.assignable(family,handler),subtype=program.assignable(handler,family);
+            if(thrown.value().equals(Optional.of(true)) && thrown.pending().isEmpty() || subtype.value().equals(Optional.of(true)) && subtype.pending().isEmpty())return new Query<>(Optional.of(true),List.of());
+            pending.addAll(thrown.pending());pending.addAll(subtype.pending());
+            unknown|=thrown.value().isEmpty() || subtype.value().isEmpty();
+        }
+        return new Query<>(unknown || !pending.isEmpty()?Optional.empty():Optional.of(false),List.copyOf(new LinkedHashSet<>(pending)));
     }
     private boolean safe(Unit unit) {
         if(!unit.thrown.empty())return false;
         if(unit.normal.isPresent())return !unit.normal.get().empty() && unit.normal.get().alternatives().stream().allMatch(b -> b.atom()==NormalValue.CERTAIN);
+        if(unit.action instanceof ReadField read && thisReceiver(unit,read.receiver())
+                || unit.action instanceof WriteField write && thisReceiver(unit,write.receiver()))return true;
         List<Value> operands=sources(unit.action).stream().map(source -> resolve(unit,source)).toList();
         Map<Integer,Integer> lengths=new HashMap<>();
         if(unit.action instanceof ReadArray || unit.action instanceof WriteArray)for(Bound array:operands.get(0).alternatives())if(array.atom() instanceof ObjectValue object)
             length(unit,object).ifPresent(size -> lengths.put(object.id(),size));
         return jvm.normal(unit.action,operands,lengths);
     }
+    private boolean thisReceiver(Unit unit,Sources receiver) {
+        return !unit.state.facts.method().isStatic() && receiver.parameter(0);
+    }
     private boolean uncaught(Unit source) {
         int index=source.action.site().instruction();
-        return source.thrown.alternatives().stream().anyMatch(b -> b.atom() instanceof ObjectValue object && source.state.facts.handlers().stream().filter(h -> h.start()<=index && index<h.end())
+        return source.thrown.alternatives().stream().allMatch(b -> b.atom() instanceof ObjectValue object && source.state.facts.handlers().stream().filter(h -> h.start()<=index && index<h.end())
                 .map(h -> program.assignable(object.type(),h.type())).allMatch(q -> q.value().equals(Optional.of(false)) && q.pending().isEmpty()));
     }
     private boolean dominates(State state,int blocked,int target) {
@@ -1135,6 +1268,17 @@ public final class Analyzer {
     private void throwing(Unit unit,String type,Path path,List<Gap> gaps) {
         throwing(unit,Value.of(object(unit,unit.action.site().instruction(),type,"JVM exceptional result",true),path).requiring(gaps));
     }
+    private boolean rejected(Unit unit,JvmSemantics.Check check,Combination binding) {
+        for(JvmSemantics.Possible possible:check.possible()) {
+            Gap condition=new Gap(GapKind.CONTROL_CONDITION,unit.action.site(),possible.detail());
+            throwing(unit,Value.of(object(unit,unit.action.site().instruction(),possible.type(),"possible JVM exceptional result",true),binding.path())
+                    .requiring(union(binding.gaps(),List.of(condition))).tracing(binding.dependencies()));
+        }
+        if(!(check instanceof JvmSemantics.Rejected rejected))return false;
+        throwing(unit,Value.of(object(unit,unit.action.site().instruction(),rejected.exception(),"JVM exceptional result",true),binding.path())
+                .requiring(binding.gaps()).tracing(binding.dependencies()));
+        return true;
+    }
 
     private List<Combination> combinations(Unit unit, List<Value> values, Path path) {
         String detail="binding combination budget at "+unit.action.site();
@@ -1158,6 +1302,7 @@ public final class Analyzer {
 
     private boolean compatibleGuards(Unit unit,Path path) {
         for(Guard guard:unit.state.facts.guards().getOrDefault(unit.action.site().instruction(),List.of()))if(guard.kind()==GuardKind.BRANCH) {
+            if(handlerLoopGuard(unit,guard))continue;
             Unit source=producer(unit,guard.branch(),false);
             if(source!=null && source.action instanceof Branch branch && source.progress instanceof Finished done) {
                 Value outcomes=done.value().under(path);
@@ -1165,6 +1310,16 @@ public final class Analyzer {
             }
         }
         return true;
+    }
+
+    private boolean handlerLoopGuard(Unit unit,Guard guard) {
+        if(guard.kind()!=GuardKind.BRANCH || unit.iteration.isPresent())return false;
+        Optional<Loop> owner=loop(unit.state,guard.branch());
+        if(owner.isEmpty())return false;
+        return unit.state.facts.guards().getOrDefault(unit.action.site().instruction(),List.of()).stream()
+                .filter(item -> item.kind()==GuardKind.HANDLER)
+                .anyMatch(item -> unit.state.handlerSources.getOrDefault(item.branch(),Set.of()).stream()
+                        .anyMatch(source -> source.iteration.filter(i -> i.loop().equals(owner.get())).isPresent()));
     }
 
     private void execute(Unit unit) {
@@ -1195,9 +1350,13 @@ public final class Analyzer {
                 && unit.iteration.filter(i -> i.loop().iterator().isEmpty()).isPresent() && unit.previousEffect.iteration.filter(i -> i.loop().equals(unit.iteration.get().loop()) && i.index()<iteration(unit)).isPresent();
         if (!skipped && unit.previousEffect != null && unit.previousEffect.progress instanceof Waiting) { demandControl(unit); return; }
         if(!skipped && unit.previousEffect!=null && unit.previousEffect.progress instanceof Finished previous && previous.value().empty()){finish(unit,Value.BOTTOM);return;}
+        if(!skipped && unit.previousEffect!=null && unit.previousEffect.progress instanceof Finished previous) {
+            path=normalPath(unit,path,previous.value().under(path));unit.executionPath=Optional.of(path);
+        }
         if(!skipped && unit.previousEffect!=null && unit.previousEffect.normal.isPresent()) {
-            if(unit.previousEffect.normal.get().under(path).empty()){finish(unit,Value.BOTTOM);return;}
-            requireControl(unit,evidence.control(unit.previousEffect.state.id,unit.previousEffect.action.site(),unit.previousEffect.normal.get(),path),path);
+            Value normal=unit.previousEffect.normal.get().under(path);
+            if(normal.empty()){finish(unit,Value.BOTTOM);return;}
+            requireControl(unit,evidence.control(unit.previousEffect.state.id,unit.previousEffect.action.site(),normal,path),path);
         }
         if (!skipped && unit.previousEffect!=null && unit.previousEffect.progress instanceof Finished previous)
             for (Bound value:previous.value().under(path).alternatives()) {
@@ -1230,7 +1389,7 @@ public final class Analyzer {
             Value result = Value.BOTTOM;
             for (Combination c : combinations) {
                 JvmSemantics.Check check=jvm.check(array,c.atoms(),OptionalInt.empty());
-                if(check instanceof JvmSemantics.Rejected rejected){throwing(unit,rejected.exception(),c.path(),c.gaps());continue;}
+                if(rejected(unit,check,c))continue;
                 c=new Combination(c.atoms(),c.path(),union(c.gaps(),((JvmSemantics.Normal)check).gaps()),c.dependencies());
                 write(unit, object, new Length(), Value.of(c.atoms().get(0), c.path()).requiring(c.gaps()).tracing(c.dependencies()));
                 result = merge(unit,result,Value.of(object, c.path()).requiring(c.gaps()).tracing(c.dependencies()));
@@ -1255,8 +1414,8 @@ public final class Analyzer {
             if (combinations.isEmpty()) return;
             Value completed=Value.BOTTOM;
             for (Combination c : combinations) {
-                JvmSemantics.Check check=jvm.check(field,c.atoms(),OptionalInt.empty());
-                if(check instanceof JvmSemantics.Rejected rejected){throwing(unit,rejected.exception(),c.path(),c.gaps());continue;}
+                JvmSemantics.Check check=jvm.check(field,c.atoms(),OptionalInt.empty(),thisReceiver(unit,field.receiver()));
+                if(rejected(unit,check,c))continue;
                 List<Gap> gaps=union(c.gaps(),((JvmSemantics.Normal)check).gaps());
                 if(c.atoms().get(0) instanceof ObjectValue object)
                     write(unit,object,new Field(field.field()),Value.of(c.atoms().get(1),c.path()).requiring(gaps).tracing(c.dependencies()));
@@ -1271,7 +1430,7 @@ public final class Analyzer {
                 Atom receiver=c.atoms().get(0);
                 OptionalInt size=receiver instanceof ObjectValue object?length(unit,object):OptionalInt.empty();
                 JvmSemantics.Check check=jvm.check(array,c.atoms(),size);
-                if(check instanceof JvmSemantics.Rejected rejected){throwing(unit,rejected.exception(),c.path(),c.gaps());continue;}
+                if(rejected(unit,check,c))continue;
                 List<Gap> gaps=union(c.gaps(),((JvmSemantics.Normal)check).gaps());
                 if(receiver instanceof ArrayValue snapshot) {
                     if(snapshot.order()==ArrayOrder.UNSPECIFIED) {
@@ -1287,6 +1446,17 @@ public final class Analyzer {
                         String component=object.type().substring(1);
                         element=Value.of(new Literal(component.startsWith("L") || component.startsWith("[")?null:0),c.path());
                     }
+                    if(element.empty() && object.source().isPresent() && object.type().startsWith("[") && slot instanceof Index at) {
+                        String component=object.type().substring(1);InputSource source=object.source().orElseThrow().at(at);
+                        Atom member;
+                        if(component.startsWith("L") || component.startsWith("[")) {
+                            int loader=program.scope(Values.type(component),object.loader());
+                            ObjectValue original=elements.computeIfAbsent(new ExternalElement(object.id(),at),key -> new ObjectValue(nextObject++,Values.type(component),false,
+                                    "input array element "+at+" of object "+object.id(),false,Optional.of(source),loader));
+                            member=new ObjectValue(original.id(),Values.type(component),false,original.origin(),false,Optional.of(source),loader);
+                        } else member=new ExternalValue(component,source);
+                        element=Value.of(member,c.path()).requiring(List.of(new Gap(GapKind.INPUT_BINDING,array.site(),"array element binding is unspecified")));
+                    }
                     if(element.empty())element=Value.of(new Unknown("array element not supplied"),c.path()).requiring(List.of(new Gap(GapKind.INPUT_BINDING,array.site(),"array element binding is unspecified")));
                     value=value.merge(element.requiring(gaps).tracing(c.dependencies()));
                 } else value=value.merge(Value.of(new Unknown("array receiver is unspecified"),c.path()).requiring(gaps).tracing(c.dependencies()));
@@ -1299,7 +1469,7 @@ public final class Analyzer {
             for (Combination c : combinations) {
                 OptionalInt size=c.atoms().get(0) instanceof ObjectValue object?length(unit,object):OptionalInt.empty();
                 JvmSemantics.Check check=jvm.check(array,c.atoms(),size);
-                if(check instanceof JvmSemantics.Rejected rejected){throwing(unit,rejected.exception(),c.path(),c.gaps());continue;}
+                if(rejected(unit,check,c))continue;
                 List<Gap> gaps=union(c.gaps(),((JvmSemantics.Normal)check).gaps());
                 if(c.atoms().get(0) instanceof ObjectValue object)
                     write(unit,object,index(c.atoms().get(1)),Value.of(c.atoms().get(2),c.path()).requiring(gaps).tracing(c.dependencies()));
@@ -1329,11 +1499,11 @@ public final class Analyzer {
             List<Value> inputs=branch.inputs().stream().map(source -> resolve(unit,source)).toList();
             if (inputs.stream().anyMatch(Value::empty)) return;
             if(unit.iteration.isEmpty() && !(unit.progress instanceof Finished done && !done.value().empty()) && inputs.size()==2) {
-                Iterations.counterPlan(state.facts,branch,inputs.get(1),Math.min(8,limits.alternatives()),state.loops).ifPresent(plan -> {
+                Iterations.counterPlan(state.facts,branch,inputs.get(1),limits.alternatives(),state.loops).ifPresent(plan -> {
                     Unit previous=state.producers.get(plan.counterInitial());
                     for(Unit body:state.units)if(plan.start()<=body.action.site().instruction() && body.action.site().instruction()<=plan.end()
                             && body.previousEffect!=null && body.previousEffect.action.site().instruction()<plan.start()){previous=body.previousEffect;break;}
-                    if(plan.prefix())limit("counter loop prefix ("+plan.count()+") at "+branch.site());
+                    if(plan.prefix())counterFrontiers.add(new CounterFrontier(state,plan,branch.site()));
                     instantiate(unit,plan,previous);
                 });
                 inputs=branch.inputs().stream().map(source -> resolve(unit,source)).toList();
@@ -1351,7 +1521,7 @@ public final class Analyzer {
             Value result = Value.BOTTOM;
             for (Combination c : combinations) {
                 JvmSemantics.Check check=jvm.check(compute,c.atoms(),OptionalInt.empty());
-                if(check instanceof JvmSemantics.Rejected rejected){throwing(unit,rejected.exception(),c.path(),c.gaps());continue;}
+                if(rejected(unit,check,c))continue;
                 c=new Combination(c.atoms(),c.path(),union(c.gaps(),((JvmSemantics.Normal)check).gaps()),c.dependencies());
                 if (compute.opcode()==Opcodes.ARRAYLENGTH && c.atoms().get(0) instanceof ArrayValue arrayValue) {
                     Atom size=arrayValue.extent()==ArrayExtent.EXACT?new Literal(arrayValue.elements().size()):new Unknown("array snapshot length is unresolved");
@@ -1385,6 +1555,12 @@ public final class Analyzer {
     private State root(State state){while(state.key.parent()>=0)state=states.get(state.key.parent());return state;}
     private ObjectValue staticObject(State state,String owner,int loader) {
         State root=root(state);return objects.computeIfAbsent(new ObjectKey(root.id,-2,owner,"static fields",loader,-1,root.key.phase(),List.of()),key -> new ObjectValue(nextObject++,owner,true,"static fields",true,Optional.empty(),loader));
+    }
+    private boolean staticDefaults(State state,FieldId field,Path path) {
+        Optional<ClassInfo> type=program.type(field.owner(),field.loader());
+        if(type.isPresent() && type.get().role()!=Inputs.Role.PLATFORM)return true;
+        Initialization key=new Initialization(root(state).id,field.owner(),field.loader());
+        return initializers.getOrDefault(key,List.of()).stream().anyMatch(initializer -> initializer.key.path().and(path).isPresent());
     }
 
     private boolean initialized(Unit consumer,String owner,Path path,Set<DefinedType> visiting) {
@@ -1476,8 +1652,8 @@ public final class Analyzer {
         if (receivers.empty()) return;
         Value result = Value.BOTTOM;
         for (Combination c : combinations(unit, List.of(receivers), path)) {
-            JvmSemantics.Check check=jvm.check(field,c.atoms(),OptionalInt.empty());
-            if(check instanceof JvmSemantics.Rejected rejected){throwing(unit,rejected.exception(),c.path(),c.gaps());continue;}
+            JvmSemantics.Check check=jvm.check(field,c.atoms(),OptionalInt.empty(),thisReceiver(unit,field.receiver()));
+            if(rejected(unit,check,c))continue;
             c=new Combination(c.atoms(),c.path(),union(c.gaps(),((JvmSemantics.Normal)check).gaps()),c.dependencies());
             if (!(c.atoms().get(0) instanceof ObjectValue receiver)) {
                 result=merge(unit,result,Value.of(new Unknown("field receiver has no positioned heap binding"),c.path()).requiring(c.gaps()).tracing(c.dependencies()));continue;
@@ -1486,7 +1662,7 @@ public final class Analyzer {
             if (value.empty()) {
                 String descriptor = field.field().descriptor();
                 Atom atom;
-                if (receiver.defaultFields()) atom = new Literal(descriptor.startsWith("L") || descriptor.startsWith("[") ? null : 0);
+                if (receiver.defaultFields() && (!field.receiver().origins().isEmpty() || staticDefaults(state,field.field(),c.path()))) atom = new Literal(descriptor.startsWith("L") || descriptor.startsWith("[") ? null : 0);
                 else if (descriptor.startsWith("L") || descriptor.startsWith("[")) {
                     atom = fields.computeIfAbsent(new ExternalField(receiver.id(), field.field()), key -> new ObjectValue(nextObject++, Values.type(descriptor), false,
                             "field " + field.field().owner() + "." + field.field().name() + " of object " + receiver.id() + " (" + receiver.origin() + ")",false,receiver.source().map(s -> s.at(new Field(field.field()))),program.scope(Values.type(descriptor),field.field().loader())));
@@ -1581,20 +1757,56 @@ public final class Analyzer {
                     returned=merge(unit,returned,Value.NULL.under(c.path()).requiring(c.gaps()).tracing(c.dependencies()));
                 } else if(output instanceof Awaiting)waiting=true;
             } else {
-                Query<List<VirtualTarget>> resolution = dispatch(call, receiver);
-                List<Optional<VirtualTarget>> choices=resolution.value().orElse(List.of()).stream().map(Optional::of).toList();
-                if(!resolution.pending().isEmpty() && !choices.isEmpty()) {
+                Optional<Local> proxy=knowledge.serializedProxy(invocation,limits.alternatives());
+                if(proxy.isPresent()) {
+                    EffectResult output=effects(unit,invocation,proxy.get(),c.gaps(),c.dependencies(),0,List.of(),List.of());
+                    if(output instanceof Produced value)returned=merge(unit,returned,value.value());
+                    else if(output instanceof CompletedVoid) {
+                        if(!returnType.isVoid())throw new IllegalStateException("nonvoid proxy dispatch omitted its result: "+call.target());
+                        returned=merge(unit,returned,Value.NULL.under(c.path()).requiring(c.gaps()).tracing(c.dependencies()));
+                    } else if(output instanceof Awaiting)waiting=true;
+                }
+                Query<List<VirtualTarget>> resolution = dispatch(call, receiver,c.path());
+                int callDepth=0;for(State ancestor=unit.state;ancestor.key.parent()>=0;ancestor=states.get(ancestor.key.parent()))callDepth++;
+                DispatchPartition partition=partition(unit,invocation,resolution,callDepth);
+                List<Optional<VirtualTarget>> choices=partition.ordinary().stream().map(Optional::of).toList();
+                if(partition.evaluationLimited())limit("static evaluation work allowance at "+call.site());
+                if(partition.omitted()) {
+                    String detail="virtual target frontier ("+limits.alternatives()+"): "+call.target();limit(detail);
+                    Gap gap=new Gap(GapKind.BUDGET,call.site(),detail);
+                    int frontier=relation(unit,Kind.DYNAMIC_CALL,Optional.empty(),Evidence.CONDITIONAL,receiver,arguments,List.of(call.site()),List.of(gap),c.path(),"unexpanded virtual targets",c.dependencies());observe(unit,frontier,List.of());
+                }
+                for(QueryIssue issue:resolution.pending())if(issue.cause()==QueryCause.BUDGET)limit(issue.detail());
+                if(!resolution.pending().isEmpty() && (!choices.isEmpty() || partition.pure().isPresent())) {
                     int frontier=relation(unit,Kind.DYNAMIC_CALL,Optional.empty(),Evidence.CONDITIONAL,receiver,arguments,List.of(call.site()),JvmSemantics.queryGaps(call.site(),resolution),c.path(),"virtual target search frontier",c.dependencies());
                     observe(unit,frontier,List.of());
                 }
-                if(choices.isEmpty())choices=List.of(Optional.empty());
+                if(choices.isEmpty() && partition.pure().isEmpty())choices=List.of(Optional.empty());
                 AlternativeScope scope=new AlternativeScope(call.target(),new CallBinding(receiver,arguments),unit.effects);
                 int allowed=unit.alternativeTurns.getOrDefault(scope,1),selection=0;
+                if(partition.pure().isPresent()) {
+                    PureGroup group=partition.pure().orElseThrow();selection++;
+                    Optional<Path> selected=c.path().with(new TargetChoice(state.id,call.site().instruction(),iteration(unit),unit.effects),Integer.MIN_VALUE);
+                    Optional<InputLocation> source=Values.location(receiver);
+                    if(selected.isPresent() && source.isPresent())selected=selected.get().selecting(source.get().at(new RuntimeClass()),group.types());
+                    if(selected.isPresent()) {
+                        Path targetPath=selected.get();List<Gap> gaps=union(c.gaps(),List.of(new Gap(GapKind.INPUT_BINDING,call.site(),"runtime receiver must belong to the evaluated type group")));
+                        EvaluationKey key=new EvaluationKey(call.target(),receiver,arguments,targetPath,gaps,c.dependencies(),Evidence.CONDITIONAL,conditions.gaps(targetPath),program.definitionCount());
+                        EvaluationView view=unit.evaluations.get(key);
+                        if(view==null && steps<limits.steps()) {
+                            steps++;refinementWork++;int edge=relation(unit,Kind.VIRTUAL_CALL,Optional.of(call.target()),Evidence.CONDITIONAL,receiver,arguments,group.witnesses(),gaps,targetPath,"equivalent side-effect-free virtual targets evaluated from bytecode",c.dependencies());
+                            Set<Integer> dependencies=edge<0?c.dependencies():Set.of(edge);
+                            view=new EvaluationView(Value.NULL.under(targetPath).requiring(gaps).tracing(dependencies),Value.of(NormalValue.CERTAIN,targetPath).requiring(gaps).tracing(dependencies));
+                            if(edge>=0){if(unit.evaluations.size()>=Math.min(8192,limits.relations()))unit.evaluations.remove(unit.evaluations.keySet().iterator().next());unit.evaluations.put(key,view);}
+                        }
+                        if(view!=null){unit.normal=Optional.of(bounded(unit.normal.orElse(Value.BOTTOM).merge(view.completion()),call.site()));returned=merge(unit,returned,view.returned());}
+                    }
+                }
                 for(Optional<VirtualTarget> choice:choices) {
                     if(selection>=allowed){unit.alternativeTurns.put(scope,allowed+1);offer(unit);waiting=true;break;}
                     Optional<Method> target=choice.map(VirtualTarget::method);
                     selection++;int selected=unit.virtualSelections.computeIfAbsent(new ReceiverTarget(target.map(Method::id).orElse(call.target()),choice.flatMap(VirtualTarget::receiver)),key -> unit.virtualSelections.size());
-                    Path targetPath=choices.size()==1?c.path():c.path().with(new TargetChoice(state.id,call.site().instruction(),iteration(unit),unit.effects),selected).orElseThrow();
+                    Path targetPath=choices.size()==1 && partition.pure().isEmpty() && proxy.isEmpty()?c.path():c.path().with(new TargetChoice(state.id,call.site().instruction(),iteration(unit),unit.effects),selected).orElseThrow();
                     Atom actualReceiver=receiver;
                     if(receiver instanceof ObjectValue object && !object.exact() && choice.flatMap(VirtualTarget::receiver).isPresent()) {
                         DefinedType runtime=choice.orElseThrow().receiver().orElseThrow();
@@ -1626,6 +1838,31 @@ public final class Analyzer {
                     else if(output instanceof Awaiting)waiting=true;
                 } else if (target.isPresent() && target.get().hasBody() && !knowledge.isImpact(target.get().id())
                         && program.type(target.get().id().owner(),target.get().id().loader()).orElseThrow().role() != Inputs.Role.PLATFORM) {
+                    if(call.opcode()!=Opcodes.INVOKESTATIC && call.opcode()!=Opcodes.INVOKESPECIAL && actualReceiver instanceof ObjectValue exact && exact.exact()) {
+                        EvaluationKey key=new EvaluationKey(target.get().id(),actualReceiver,arguments,targetPath,gaps,c.dependencies(),evidence,conditions.gaps(targetPath),program.definitionCount());
+                        EvaluationView view=unit.evaluations.get(key);
+                        if(view==null) {
+                            BoundedEvaluation.Outcome attempt=evaluation.evaluate(target.get().id(),limits.steps()-steps);
+                            steps+=attempt.work();refinementWork+=attempt.work();
+                            int depth=0;for(State ancestor=unit.state;ancestor.key.parent()>=0;ancestor=states.get(ancestor.key.parent()))depth++;
+                            if(attempt.proof().isPresent() && (long)depth+attempt.proof().get().depth()<=limits.depth()
+                                    && safeNested(attempt.proof().get(),actualReceiver,targetPath)) {
+                                BoundedEvaluation.Proof proof=attempt.proof().get();
+                                List<Site> witnesses=new ArrayList<>(List.of(call.site()));witnesses.addAll(proof.witnesses());
+                                int edge=relation(unit,Kind.VIRTUAL_CALL,Optional.of(target.get().id()),evidence,actualReceiver,arguments,witnesses,gaps,targetPath,"side-effect-free invocation evaluated from bytecode",c.dependencies());
+                                Set<Integer> dependencies=edge<0?c.dependencies():Set.of(edge);
+                                view=new EvaluationView(Value.NULL.under(targetPath).requiring(gaps).tracing(dependencies),Value.of(NormalValue.CERTAIN,targetPath).requiring(gaps).tracing(dependencies));
+                                if(edge>=0) {
+                                    if(unit.evaluations.size()>=Math.min(8192,limits.relations()))unit.evaluations.remove(unit.evaluations.keySet().iterator().next());
+                                    unit.evaluations.put(key,view);
+                                }
+                            }
+                        }
+                        if(view!=null) {
+                            unit.normal=Optional.of(bounded(unit.normal.orElse(Value.BOTTOM).merge(view.completion()),call.site()));
+                            returned=merge(unit,returned,view.returned());continue;
+                        }
+                    }
                     int relation = relation(unit, call.opcode() == Opcodes.INVOKESTATIC || call.opcode() == Opcodes.INVOKESPECIAL ? Kind.DIRECT_CALL : Kind.VIRTUAL_CALL,
                             Optional.of(target.get().id()), evidence, actualReceiver, arguments, List.of(call.site()), gaps, targetPath, "JVM invocation", c.dependencies());
                     Value output = invoke(unit, target.get().id(), actualReceiver, arguments, targetPath, gaps, relation);
@@ -1651,7 +1888,10 @@ public final class Analyzer {
         }
         if (!waiting || !returned.empty()) {
             for(Bound bound:returned.alternatives())if(bound.atom() instanceof ArrayValue array)
-                Iterations.arrayPlan(state.facts,call.site().instruction(),array,state.loops).ifPresent(plan -> instantiate(unit,plan,unit));
+                Iterations.arrayPlan(state.facts,call.site().instruction(),array,limits.alternatives(),state.loops).ifPresent(plan -> {
+                    if(plan.prefix())limit("finite array iteration budget ("+plan.count()+") at "+call.site());
+                    instantiate(unit,plan,unit);
+                });
             finish(unit, returned);
         }
     }
@@ -1776,7 +2016,7 @@ public final class Analyzer {
             } else if (effect instanceof Deferred deferredCall) {
                 defer(unit,invocation,deferredCall,incoming,dependencies);
             } else if (effect instanceof Raise raised) {
-                Value exception=Value.of(object(unit,unit.action.site().instruction(),raised.type(),"intrinsic exceptional result",true),invocation.path()).requiring(incoming);
+                Value exception=Value.of(object(unit,unit.action.site().instruction(),raised.type(),"intrinsic exceptional result",true),invocation.path()).requiring(incoming).tracing(dependencies);
                 throwing(unit,wrapped(unit,exception,wrappers,invocation.path(),incoming));state=EffectState.EXCEPTIONAL;
             } else if(effect instanceof Evaluate evaluation) {
                 if(depth>=limits.depth()) {limit("local evaluation depth budget at "+unit.action.site());state=EffectState.WAITING;}
@@ -1959,19 +2199,97 @@ public final class Analyzer {
     }
 
     private ObjectValue symbolic(Unit unit,Symbolic value) {
-        ObjectValue object=object(unit,unit.action.site().instruction(),value.type(),value.requirement(),false,value.loader());
-        return new ObjectValue(object.id(),object.type(),false,object.origin(),false,value.source(),program.scope(value.type(),value.loader()));
+        int loader=program.scope(value.type(),value.loader());
+        SymbolicKey key=new SymbolicKey(unit.state.id,unit.action.site().instruction(),value,loader,iteration(unit),phase(unit),unit.effects);
+        return symbolicObjects.computeIfAbsent(key,ignored -> new ObjectValue(nextObject++,value.type(),false,
+                value.requirement()+" at "+unit.action.site(),false,value.source(),loader));
     }
 
     private static List<Integer> effectPosition(List<Integer> parent,int index) {
         List<Integer> position=new ArrayList<>(parent);position.add(index);return List.copyOf(position);
     }
 
-    private Query<List<VirtualTarget>> dispatch(Call call, Atom receiver) {
-        if(call.opcode()!=Opcodes.INVOKESTATIC && call.opcode()!=Opcodes.INVOKESPECIAL && receiver instanceof ObjectValue object && !object.exact())
-            return program.implementations(call.target(),object.type(),object.loader(),ranking.receivers(call,object.type(),object.loader()).value().orElseThrow());
+    private boolean groupable(Call call,Atom receiver) {
+        return (call.opcode()==Opcodes.INVOKEVIRTUAL || call.opcode()==Opcodes.INVOKEINTERFACE) && call.arguments().isEmpty()
+                && program.signature(call.target()).returned().isVoid() && receiver instanceof ObjectValue object && !object.exact()
+                && program.type(call.target().owner(),call.target().loader()).filter(type -> type.role()!=Inputs.Role.PLATFORM).isPresent();
+    }
+    private Query<List<VirtualTarget>> dispatch(Call call, Atom receiver,Path path) {
+        if(call.opcode()!=Opcodes.INVOKESTATIC && call.opcode()!=Opcodes.INVOKESPECIAL && receiver instanceof ObjectValue object && !object.exact()) {
+            int targets=groupable(call,receiver)?(int)Math.min(Integer.MAX_VALUE,64L*limits.alternatives()):limits.alternatives();
+            Atom selected=Values.location(object).flatMap(source -> path.selected(source.at(new RuntimeClass()))).orElse(null);
+            List<DefinedType> preferred=ranking.receivers(call,object.type(),object.loader()).value().orElseThrow();
+            if(selected instanceof RuntimeTypes types) {
+                ScopedDispatch key=new ScopedDispatch(call.target(),object.type(),object.loader(),types,preferred,targets,program.definitionCount());
+                Query<List<VirtualTarget>> cached=scopedDispatches.get(key);if(cached!=null)return cached;
+                List<DefinedType> scope=types.members().stream().map(type -> new DefinedType(Values.type(type.descriptor()),type.loader())).toList();
+                Query<io.just.program.Dispatch.Result> query=new io.just.program.Dispatch(program).within(call.target(),object.type(),object.loader(),scope,preferred,new io.just.program.Dispatch.Budget(Integer.MAX_VALUE,targets));
+                Query<List<VirtualTarget>> result=new Query<>(query.value().map(io.just.program.Dispatch.Result::targets),query.pending());
+                if(scopedDispatches.size()>=1024)scopedDispatches.remove(scopedDispatches.keySet().iterator().next());scopedDispatches.put(key,result);return result;
+            }
+            return program.implementations(call.target(),object.type(),object.loader(),preferred,targets);
+        }
         Query<Method> selected=call.opcode()==Opcodes.INVOKESTATIC || call.opcode()==Opcodes.INVOKESPECIAL?program.lookup(call.target()):receiver instanceof ObjectValue object?program.lookup(program.method(object.type(),call.target().name(),call.target().descriptor(),object.loader())):program.lookup(call.target());
         return new Query<>(Optional.of(selected.value().map(m -> List.of(new VirtualTarget(m,Optional.empty(),selected.pending()))).orElse(List.of())),selected.value().isPresent()?List.of():selected.pending());
+    }
+
+    private DispatchPartition partition(Unit unit,Invocation invocation,Query<List<VirtualTarget>> resolution,int depth) {
+        List<VirtualTarget> targets=resolution.value().orElse(List.of());Call call=invocation.call();
+        if(!groupable(call,invocation.receiver()) || targets.isEmpty())return new DispatchPartition(targets,Optional.empty(),false,false);
+        Map<GroupContext,DispatchPartition> cached=unit.partitions.get(targets);
+        GroupContext key=new GroupContext(invocation.receiver(),invocation.path(),invocation.result(),depth,program.definitionCount(),conditions.gaps(invocation.path()));
+        if(cached!=null && cached.containsKey(key))return cached.get(key);
+        ObjectValue receiver=(ObjectValue)invocation.receiver();List<VirtualTarget> ordinary=new ArrayList<>(),feasible=new ArrayList<>();
+        List<ClassValue> pure=new ArrayList<>();Set<Site> witnesses=new LinkedHashSet<>(List.of(call.site()));
+        long allowance=Math.max(0,(limits.steps()-steps)/16),spent=0;boolean uninspected=false;
+        for(VirtualTarget candidate:targets) {
+            if(spent>=allowance){uninspected=true;ordinary.add(candidate);feasible.add(candidate);continue;}
+            spent++;steps++;refinementWork++;
+            if(candidate.receiver().isEmpty() || !candidate.pending().isEmpty() || knowledge.isImpact(candidate.method().id())){ordinary.add(candidate);feasible.add(candidate);continue;}
+            DefinedType runtime=candidate.receiver().orElseThrow();ClassValue type=new ClassValue("L"+runtime.name()+";",true,Optional.empty(),runtime.loader());
+            InputNeed need=new InputNeed(receiver,Optional.empty(),NeedKind.RECEIVER_TYPE,type.descriptor(),List.of(type),"runtime type required by this virtual dispatch");
+            Optional<Path> path=candidateBindings.require(invocation.path(),need,(object,slot) -> read(unit,object,slot));
+            if(path.isEmpty())continue;
+            feasible.add(candidate);BoundedEvaluation.Outcome attempt=evaluation.evaluate(candidate.method().id(),allowance-spent);
+            spent+=attempt.work();steps+=attempt.work();refinementWork+=attempt.work();Optional<BoundedEvaluation.Proof> proof=attempt.proof();
+            if(attempt.exhausted())uninspected=true;
+            if(proof.isPresent() && (long)depth+proof.get().depth()<=limits.depth() && 1L+proof.get().calls().size()>allowance-spent)uninspected=true;
+            if(proof.isEmpty() || (long)depth+proof.get().depth()>limits.depth() || 1L+proof.get().calls().size()>allowance-spent){ordinary.add(candidate);continue;}
+            Atom actual=CandidateBindings.project(receiver,path.get());
+            if(!(actual instanceof ObjectValue object) || !object.exact()){ordinary.add(candidate);continue;}
+            Call selected=new Call(call.site(),candidate.method().id(),call.opcode(),call.receiver(),call.arguments(),call.bootstrap());
+            Invocation check=new Invocation(selected,actual,invocation.arguments(),invocation.result(),path.get(),invocation.evaluation());
+            boolean[] reads={false};Optional<Local> model=knowledge.apply(check,(value,slot) -> {reads[0]=true;return read(unit,value,slot);});
+            if(model.isPresent() || reads[0]){ordinary.add(candidate);continue;}
+            long before=steps;boolean safe=safeNested(proof.get(),actual,path.get());spent+=steps-before;
+            if(!safe){ordinary.add(candidate);continue;}
+            pure.add(type);witnesses.addAll(proof.get().witnesses());
+        }
+        Optional<PureGroup> group=pure.size()<2?Optional.empty():Optional.of(new PureGroup(new RuntimeTypes(pure),List.copyOf(witnesses)));
+        if(group.isEmpty())ordinary=feasible;
+        int available=limits.alternatives()-(group.isPresent()?1:0);
+        boolean omitted=ordinary.size()>available;
+        if(omitted)ordinary=new ArrayList<>(ordinary.subList(0,Math.max(0,available)));
+        DispatchPartition result=new DispatchPartition(ordinary,group,omitted,uninspected && omitted);
+        if(unit.partitions.size()>=8 && !unit.partitions.containsKey(targets))unit.partitions.clear();
+        Map<GroupContext,DispatchPartition> views=unit.partitions.computeIfAbsent(targets,ignored -> new LinkedHashMap<>());
+        if(views.size()>=Math.min(128,limits.alternatives()))views.clear();views.put(key,result);return result;
+    }
+
+    /** A bytecode-only proof must not bypass an impact boundary or a local call model. */
+    private boolean safeNested(BoundedEvaluation.Proof proof,Atom receiver,Path path) {
+        long work=1L+proof.calls().size();if(work>limits.steps()-steps)return false;
+        steps+=work;refinementWork+=work;
+        ObjectValue result=new ObjectValue(-1,"java/lang/Object",false,"static evaluation",false);
+        for(Call call:proof.calls()) {
+            if(Thread.currentThread().isInterrupted())throw new CancellationException("static evaluation interrupted");
+            Query<Method> target=program.lookup(call.target());
+            if(!target.pending().isEmpty() || target.value().isEmpty() || knowledge.isImpact(call.target()) || knowledge.isImpact(target.value().orElseThrow().id()))return false;
+            boolean[] reads={false};
+            Optional<Local> model=knowledge.apply(new Invocation(call,receiver,List.of(),result,path),(object,slot) -> {reads[0]=true;return Value.BOTTOM;});
+            if(model.isPresent() || reads[0])return false;
+        }
+        return true;
     }
 
     private static boolean sameBinding(Atom first,Atom second) {
@@ -1981,7 +2299,7 @@ public final class Analyzer {
         if(first instanceof ObjectValue a && second instanceof ObjectValue b)return a.loader()==b.loader() && a.type().equals(b.type()) && a.source().isPresent() && a.source().equals(b.source());
         if(first instanceof Symbolic a && second instanceof Symbolic b)return a.type().equals(b.type()) && a.source().isPresent() && a.source().equals(b.source());
         if(first instanceof ArrayValue a && second instanceof ArrayValue b)return a.extent()==ArrayExtent.EXACT && b.extent()==ArrayExtent.EXACT && a.order()==ArrayOrder.INDEXED && b.order()==ArrayOrder.INDEXED && a.elements().size()==b.elements().size() && java.util.stream.IntStream.range(0,a.elements().size()).allMatch(i -> sameBinding(a.elements().get(i),b.elements().get(i)));
-        if(first instanceof Reflected a && second instanceof Reflected b)return a.lookup().equals(b.lookup()) && a.declared()==b.declared() && sameBinding(a.declaringClass(),b.declaringClass()) && sameBinding(a.name(),b.name()) && sameBinding(a.parameterTypes(),b.parameterTypes());
+        if(first instanceof Reflected a && second instanceof Reflected b)return a.object()==b.object() && a.member()==b.member() && a.lookup().equals(b.lookup()) && a.declared()==b.declared() && sameBinding(a.declaringClass(),b.declaringClass()) && sameBinding(a.name(),b.name()) && sameBinding(a.parameterTypes(),b.parameterTypes());
         return false;
     }
 
@@ -2044,7 +2362,7 @@ public final class Analyzer {
             Optional<Value> applied=Summaries.apply(summary.get(),child.parameters,(object,cell) -> read(caller,object,cell),program);
             if(applied.isPresent()) {
                 summaryApplications++;
-                Value value=applied.get();
+                Value value=applied.get().under(path).requiring(gaps).tracing(relation<0?Set.of():Set.of(relation));
                 if(summary.get() instanceof Summaries.FieldReturn fieldReturn) {
                     ReadField field=fieldReturn.field();
                     for(Bound binding:child.parameters.get(fieldReturn.parameter().slot()).alternatives()) {
@@ -2054,7 +2372,7 @@ public final class Analyzer {
                     }
                 }
                 child.returned=bounded(child.returned.merge(value),caller.action.site());
-                Value completed=Value.of(NormalValue.CERTAIN,path).tracing(relation<0?Set.of():Set.of(relation));
+                Value completed=Value.of(NormalValue.CERTAIN,path).requiring(gaps).tracing(relation<0?Set.of():Set.of(relation));
                 if(summary.get() instanceof Summaries.FieldReturn fieldReturn) {
                     completed=Value.BOTTOM;
                     for(Bound receiverBinding:child.parameters.get(fieldReturn.parameter().slot()).alternatives())

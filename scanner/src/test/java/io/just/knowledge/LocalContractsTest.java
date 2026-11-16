@@ -1,6 +1,7 @@
 package io.just.knowledge;
 
 import io.just.BytecodeFixtures;
+import io.just.ReferenceFixtures;
 import io.just.input.Inputs;
 import io.just.program.Program;
 import io.just.program.Program.*;
@@ -23,6 +24,105 @@ class LocalContractsTest {
     private final Site site=new Site(new MethodId("Empty","run","()V"),3,1,"source fixture");
     private Invocation call(MethodId target,Atom receiver,List<Atom> arguments) {
         return new Invocation(new Call(site,target,org.objectweb.asm.Opcodes.INVOKEVIRTUAL,new Sources(Set.of()),List.of()),receiver,arguments,new ObjectValue(99,"java/lang/Object",false,"result"),Values.Path.EMPTY);
+    }
+    @Test void reflectionReceivesTheConfiguredArrayBudget()throws Exception {
+        try(Inputs input=input()) {
+            Program program=new Program(input,20_000);ObjectValue signature=new ObjectValue(1,"[Ljava/lang/Class;",true,"signature",false);
+            Bindings heap=(object,slot) -> slot instanceof Length?Value.of(new Literal(65)):slot instanceof Index?Value.of(new ClassValue("Ljava/lang/String;",true)):Value.BOTTOM;
+            Invocation lookup=call(new MethodId("java/lang/Class","getDeclaredMethod","(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;"),new ClassValue("LEmpty;",true),List.of(new Literal("missing"),signature));
+            Local limited=new Mechanisms(program,Catalog.empty(),Set.of(),64).apply(lookup,heap).orElseThrow();
+            Local expanded=new Mechanisms(program,Catalog.empty(),Set.of(),128).apply(lookup,heap).orElseThrow();
+            assertTrue(limited.effects().stream().filter(Observe.class::isInstance).map(Observe.class::cast).flatMap(o -> o.gaps().stream()).anyMatch(g -> g.kind()==GapKind.BUDGET));
+            assertTrue(expanded.effects().stream().noneMatch(Observe.class::isInstance));
+            assertTrue(expanded.effects().stream().filter(Conditional.class::isInstance).map(Conditional.class::cast)
+                    .flatMap(choice -> choice.local().effects().stream()).anyMatch(Raise.class::isInstance));
+        }
+    }
+    @Test void fieldCollectionLimitsMembersWithoutChangingTheKnownArrayLength()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("TwoFields.java","public class TwoFields {public int first;private int second;}"));
+        try(Inputs input=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(input,20_000);
+            Invocation request=call(new MethodId("java/lang/Class","getDeclaredFields","()[Ljava/lang/reflect/Field;"),new ClassValue("LTwoFields;",true),List.of());
+            for(int budget:List.of(1,2)) {
+                Local result=new Mechanisms(program,Catalog.empty(),Set.of(),budget).apply(request,(object,slot) -> Value.BOTTOM).orElseThrow();
+                assertTrue(result.effects().stream().filter(Write.class::isInstance).map(Write.class::cast).filter(write -> write.slot() instanceof Length)
+                        .flatMap(write -> write.value().alternatives().stream()).anyMatch(bound -> bound.atom().equals(new Literal(2))));
+                boolean frontier=result.effects().stream().filter(Observe.class::isInstance).map(Observe.class::cast)
+                        .flatMap(observation -> observation.gaps().stream()).anyMatch(gap -> gap.kind()==GapKind.BUDGET);
+                assertEquals(budget==1,frontier);
+            }
+        }
+    }
+    @Test void reflectiveMemberFrontiersExpandWithoutFalseCutoffsAtTheExactLimit()throws Exception {
+        StringBuilder source=new StringBuilder("public class Many {");
+        for(int i=0;i<6;i++) {
+            source.append("public Many(");
+            for(int p=0;p<i;p++){if(p>0)source.append(',');source.append("int p").append(p);}
+            source.append("){} public static void method").append(i).append("(){}");
+        }
+        source.append('}');
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("Many.java",source.toString()));
+        try(Inputs input=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(input,20_000);ClassValue owner=new ClassValue("LMany;",true);
+            Invocation constructors=call(new MethodId("java/lang/Class","getDeclaredConstructor","([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;"),owner,List.of(new Unknown("signature")));
+            Reflected reflected=new Reflected(owner,new Unknown("name"),new Unknown("signature"),true,site);
+            Invocation methods=call(Reflection.INVOKE,reflected,List.of(new Literal(null),new Literal(null)));
+            for(int budget:List.of(4,6,8)) {
+                Mechanisms mechanisms=new Mechanisms(program,Catalog.empty(),Set.of(),budget);
+                for(Invocation request:List.of(constructors,methods)) {
+                    Local result=mechanisms.apply(request,(object,slot) -> Value.BOTTOM).orElseThrow();
+                    assertEquals(Math.min(6,budget),result.effects().stream().filter(Alternative.class::isInstance).map(Alternative.class::cast).filter(choice -> choice.selection()>=0).count(),request.call().target().toString());
+                    boolean frontier=result.effects().stream().filter(Observe.class::isInstance).map(Observe.class::cast)
+                            .flatMap(observation -> observation.gaps().stream()).anyMatch(gap -> gap.kind()==GapKind.BUDGET);
+                    assertEquals(budget<6,frontier,"only omitted member candidates mark the result truncated");
+                }
+            }
+        }
+    }
+    @Test void reflectiveSignatureAndArgumentProductsRespectTheSharedBudget()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("Overloads.java","""
+                public class Overloads {
+                  public static void accept(Object value){}
+                  public static void accept(String value){}
+                }
+                """));
+        try(Inputs input=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(input,20_000);
+            ObjectValue types=new ObjectValue(1,"[Ljava/lang/Class;",true,"types",false),args=new ObjectValue(2,"[Ljava/lang/Object;",true,"args",false);
+            Reflected method=new Reflected(new ClassValue("LOverloads;",true),new Literal("accept"),types,true,site);
+            Invocation invoke=call(Reflection.INVOKE,method,List.of(new Literal(null),args));
+            Bindings heap=(object,slot) -> {
+                if(slot instanceof Length)return Value.of(new Literal(1));
+                if(!(slot instanceof Index))return Value.BOTTOM;
+                if(object.equals(types))return Value.of(new ClassValue("Ljava/lang/Object;",true)).merge(Value.of(new ClassValue("Ljava/lang/String;",true)));
+                return Value.of(new Literal("a")).merge(Value.of(new Literal("b"))).merge(Value.of(new Literal("c")));
+            };
+            for(int budget:List.of(4,6)) {
+                Local result=new Mechanisms(program,Catalog.empty(),Set.of(),budget).apply(invoke,heap).orElseThrow();
+                List<Conditional> choices=result.effects().stream().filter(Conditional.class::isInstance).map(Conditional.class::cast).toList();
+                assertEquals(Math.min(6,budget),choices.stream().filter(choice -> choice.gaps().stream().noneMatch(gap -> gap.kind()==GapKind.BUDGET)).count());
+                assertEquals(budget<6,choices.stream().flatMap(choice -> choice.gaps().stream()).anyMatch(gap -> gap.kind()==GapKind.BUDGET));
+            }
+        }
+    }
+    @Test void rankingMetadataLimitKeepsAllSemanticCandidatesAndReportsItsOwnIssue()throws Exception {
+        Path classes=BytecodeFixtures.compile(temp,17,Map.of("RankSource.java","""
+                public class RankSource {
+                  static class Box {void accept(Object value){}}
+                  static void reference(Box box){box.accept(box);}
+                }
+                """));
+        try(Inputs input=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(input,20_000);
+            Path reference=ReferenceFixtures.write(temp.resolve("rank-source.json"),program,new MethodId("RankSource","reference","(LRankSource$Box;)V"));
+            Guidance guidance=new Guidance(program,Catalog.read(reference),64);
+            List<Method> methods=java.util.stream.IntStream.range(0,2049)
+                    .mapToObj(i -> new Method(new MethodId("RankSource","candidate"+i,"()V"),org.objectweb.asm.Opcodes.ACC_PUBLIC,List.of())).toList();
+            Query<List<Method>> ordered=guidance.order(methods);
+            assertEquals(methods,ordered.value().orElseThrow());assertTrue(ordered.pending().isEmpty());
+            assertTrue(guidance.issues().stream().anyMatch(issue -> issue.detail().startsWith("relation member metadata frontier")));
+            guidance.enabled(false);assertTrue(guidance.issues().isEmpty());
+        }
     }
     @Test void completionQueriesReadTheRealHeapAndNeverDefineClasses() throws Exception {
         try(Inputs input=input()) {

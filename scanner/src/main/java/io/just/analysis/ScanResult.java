@@ -14,11 +14,11 @@ public record ScanResult(Mode mode, Execution execution, Outcome outcome, Inputs
                          Analyzer.Limits analysisBudgets, int methodInstructionBudget,
                          List<Entry> entries, List<Hint> hints, List<Relation> relations,
                          List<Finding> findings, List<String> limitations, List<String> missingClasses,
-                         Statistics statistics,List<InputRequirement> inputRequirements,List<DemandFrontier> demandFrontier,List<Breakpoint> breakpoints) {
+                         Statistics statistics,List<InputRequirement> inputRequirements,List<DemandFrontier> demandFrontier,List<Breakpoint> breakpoints,List<QueryIssue> rankingIssues) {
     public ScanResult {
         entries=List.copyOf(entries);hints=List.copyOf(hints);relations=List.copyOf(relations);findings=List.copyOf(findings);
         limitations=List.copyOf(limitations);missingClasses=List.copyOf(missingClasses);
-        inputRequirements=List.copyOf(inputRequirements);demandFrontier=List.copyOf(demandFrontier);breakpoints=List.copyOf(breakpoints);
+        inputRequirements=List.copyOf(inputRequirements);demandFrontier=List.copyOf(demandFrontier);breakpoints=List.copyOf(breakpoints);rankingIssues=List.copyOf(rankingIssues);
     }
     public enum Execution { FINISHED, TRUNCATED }
     public enum Outcome { FINDINGS, NO_FINDINGS }

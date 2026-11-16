@@ -32,6 +32,8 @@ class ConstructionTest {
                   static void hit(){}static void wrong(){}static void good(){}
                   public static class Product {static String prefix=prefix();String name;static String prefix(){return "h";}public Product(){name=prefix+"it";}public Product(String first,String second){name=first+second;}public Product(Integer wrong){name="wrong";}public String name(){return name;}}
                   public static class Primitive {int count;public Primitive(int count){this.count=count;}public int count(){return count;}}
+                  public static class Flag {boolean enabled;public Flag(boolean enabled){this.enabled=enabled;}}
+                  public static class Small {int value;public Small(byte value){this.value=value;}public Small(short value){this.value=value;}public Small(char value){this.value=value;}}
                   public static class Private {private Private(){}}
                   public static abstract class Abstract {public Abstract(){}}
                   public static class Base {public Base(String text){}}
@@ -44,6 +46,11 @@ class ConstructionTest {
                   public static void bound()throws Exception {Class<?>[] types={String.class,String.class};Constructor<Product> ctor=Product.class.getConstructor(types);types[0]=Integer.class;use(ctor.newInstance("h","it"));}
                   public static void legacy()throws Exception {use(Product.class.newInstance());}
                   public static void primitive()throws Exception {Primitive p=Primitive.class.getConstructor(int.class).newInstance(7);if(p.count()==7)good();else wrong();}
+                  public static void flagFalse()throws Exception {Flag f=Flag.class.getConstructor(boolean.class).newInstance(false);if(f.enabled)wrong();else good();}
+                  public static void flagTrue()throws Exception {Flag f=Flag.class.getConstructor(boolean.class).newInstance(true);if(f.enabled)good();else wrong();}
+                  public static void boxedByte()throws Exception {Small s=Small.class.getConstructor(byte.class).newInstance((byte)7);if(s.value==7)good();else wrong();}
+                  public static void boxedShort()throws Exception {Small s=Small.class.getConstructor(short.class).newInstance((short)8);if(s.value==8)good();else wrong();}
+                  public static void boxedChar()throws Exception {Small s=Small.class.getConstructor(char.class).newInstance('x');if(s.value=='x')good();else wrong();}
                   public static void access()throws Exception {Constructor<Private> ctor=Private.class.getDeclaredConstructor();try{ctor.newInstance();wrong();}catch(IllegalAccessException expected){good();}}
                   public static void override()throws Exception {Constructor<Private> ctor=Private.class.getDeclaredConstructor();ctor.setAccessible(true);ctor.newInstance();good();}
                   public static void abstractType()throws Exception {Constructor<Abstract> ctor=Abstract.class.getConstructor();try{ctor.newInstance();wrong();}catch(InstantiationException expected){good();}}
@@ -65,6 +72,10 @@ class ConstructionTest {
         Path classes=fixture();
         for(String entry:List.of("bound","legacy"))assertEquals(Set.of("use","hit"),targets(scan(classes,entry,"()V")),entry);
         assertEquals(Set.of("good"),targets(scan(classes,"primitive","()V")));
+    }
+    @Test void boxedConstructorArgumentsKeepTheirPrimitiveValues()throws Exception {
+        Path classes=fixture();
+        for(String entry:List.of("flagFalse","flagTrue","boxedByte","boxedShort","boxedChar"))assertEquals(Set.of("good"),targets(scan(classes,entry,"()V")),entry);
     }
     @Test void constructorsDoNotInheritAndInvalidAccessTypesOrArgumentsThrow()throws Exception {
         Path classes=fixture();

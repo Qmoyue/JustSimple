@@ -33,7 +33,7 @@ class JvmSemanticsTest {
             assertInstanceOf(Values.Unknown.class,jvm.compute(test,List.of(unresolved)));
             Values.ObjectValue array=new Values.ObjectValue(3,"[LSame;",true,"array",false,Optional.empty(),loader);
             Sources empty=new Sources(Set.of());WriteArray store=new WriteArray(site,empty,empty,empty);
-            assertEquals(new JvmSemantics.Normal(List.of()),jvm.check(store,List.of(array,new Values.Literal(0),foreign),OptionalInt.of(1)));
+            assertEquals(new JvmSemantics.Normal(List.of(),List.of()),jvm.check(store,List.of(array,new Values.Literal(0),foreign),OptionalInt.of(1)));
             assertEquals(new JvmSemantics.Rejected("java/lang/ArrayStoreException"),jvm.check(store,List.of(array,new Values.Literal(0),local),OptionalInt.of(1)));
         }
     }

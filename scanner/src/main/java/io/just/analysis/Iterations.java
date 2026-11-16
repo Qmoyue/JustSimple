@@ -6,13 +6,13 @@ import java.util.*;
 
 /** Recognizes a bounded iteration plan from facts. The caller owns execution and subscriptions. */
 final class Iterations {
-    record Loop(int start,int end,int count,OptionalInt iterator,int counterInitial,int counterAdvance,boolean prefix) {
-        Loop(int start,int end,int count,int iterator){this(start,end,count,OptionalInt.of(iterator),-1,-1,false);}
-        Loop(int start,int end,int count,int iterator,int initial,int advance){this(start,end,count,OptionalInt.of(iterator),initial,advance,false);}
-        Loop asPrefix(){return new Loop(start,end,count,iterator,counterInitial,counterAdvance,true);}
+    record Loop(int start,int end,int count,OptionalInt iterator,int counterInitial,int counterAdvance,boolean prefix,boolean extensible) {
+        Loop(int start,int end,int count,int iterator){this(start,end,count,OptionalInt.of(iterator),-1,-1,false,false);}
+        Loop(int start,int end,int count,int iterator,int initial,int advance){this(start,end,count,OptionalInt.of(iterator),initial,advance,false,false);}
+        Loop asPrefix(boolean canExpand){return new Loop(start,end,count,iterator,counterInitial,counterAdvance,true,canExpand);}
     }
-    static Optional<Loop> arrayPlan(Facts facts,int factory,ArrayValue array,List<Loop> existing) {
-        if(array.extent()!=ArrayExtent.EXACT || array.elements().size()>64)return Optional.empty();
+    static Optional<Loop> arrayPlan(Facts facts,int factory,ArrayValue array,int budget,List<Loop> existing) {
+        if(array.extent()!=ArrayExtent.EXACT)return Optional.empty();
         Map<Integer,Action> actions=new HashMap<>();for(Action action:facts.actions())actions.put(action.site().instruction(),action);
         for(Edge edge:facts.cfg()) {
             if(edge.exceptional() || edge.to()<=factory || edge.to()>=edge.from() || existing.stream().anyMatch(l -> l.start()<=edge.to() && edge.to()<=l.end()))continue;
@@ -28,7 +28,8 @@ final class Iterations {
                     else supported=false;
                 }
                 if(!supported || initial<0 || advance<0)continue;
-                return Optional.of(new Loop(edge.to(),edge.from(),array.elements().size(),array.id(),initial,advance));
+                int count=Math.min(array.elements().size(),budget);Loop plan=new Loop(edge.to(),edge.from(),count,array.id(),initial,advance);
+                return Optional.of(count<array.elements().size()?plan.asPrefix(true):plan);
             }
         }
         return Optional.empty();
@@ -65,8 +66,9 @@ final class Iterations {
             boolean invariant=header.inputs().get(1).origins().stream().noneMatch(origin -> origin instanceof Producer p && edge.to()<=p.instruction() && p.instruction()<=edge.from() && !(actions.get(p.instruction()) instanceof Constant));
             Set<Integer> bounds=new LinkedHashSet<>();boolean known=invariant;
             for(Bound bound:upper.alternatives())if(bound.atom() instanceof Literal literal && literal.value() instanceof Integer value)bounds.add(Math.max(0,value));else known=false;
-            int count=known && bounds.size()==1?Math.min(budget,bounds.iterator().next()):budget;
-            return Optional.of(new Loop(edge.to(),edge.from(),count,OptionalInt.empty(),initial,advance,!known || bounds.size()!=1 || bounds.iterator().next()>budget));
+            int count=known && bounds.size()==1?Math.min(budget,bounds.iterator().next()):Math.min(8,budget);
+            boolean finite=known && bounds.size()==1;
+            return Optional.of(new Loop(edge.to(),edge.from(),count,OptionalInt.empty(),initial,advance,!finite || bounds.iterator().next()>budget,finite));
         }
         return Optional.empty();
     }

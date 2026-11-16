@@ -47,6 +47,52 @@ final class Reflection implements Model {
             }
             effects.add(new Result(Value.of(array).requiring(pending)));return Optional.of(new Local(effects));
         }
+        if((call.is("java/lang/Class","getClasses","()[Ljava/lang/Class;") || call.is("java/lang/Class","getDeclaredClasses","()[Ljava/lang/Class;"))
+                && platformClass(call,program) && call.receiver() instanceof ClassValue owner && owner.exact()) {
+            boolean declared=call.call().target().name().equals("getDeclaredClasses");
+            Query<List<DefinedType>> query=program.memberClasses(Values.type(owner.descriptor()),declared,owner.loader(),Math.max(256,bindings.alternatives()));
+            List<Gap> pending=Mechanisms.queryGaps(call,query);List<DefinedType> members=query.value().orElseThrow();
+            ObjectValue array=new ObjectValue(call.result().id(),"[Ljava/lang/Class;",true,"reflected member class collection",false);
+            Atom length=pending.isEmpty()?new Literal(members.size()):new Unknown("member class count is incomplete");
+            List<Effect> effects=new ArrayList<>();effects.add(new RequireNormal(pending));effects.add(new Write(array,new Length(),Value.of(length).requiring(pending)));
+            Set<Bound> values=new LinkedHashSet<>();
+            for(DefinedType member:members)values.add(new Bound(new ClassValue("L"+member.name()+";",true,Optional.empty(),member.loader()),call.path()));
+            if(!pending.isEmpty())values.add(new Bound(new Unknown("member class collection is incomplete"),call.path()));
+            if(!values.isEmpty()) {
+                List<Gap> order=new ArrayList<>(pending);order.add(Mechanisms.gap(call,GapKind.CONTROL_CONDITION,"reflection member class array order is unspecified"));
+                effects.add(new Write(array,new Wildcard(),new Value(values).requiring(order)));
+            }
+            effects.add(new Result(Value.of(array).requiring(pending)));return Optional.of(new Local(effects));
+        }
+        if((call.is("java/lang/Class","getDeclaredFields","()[Ljava/lang/reflect/Field;") || call.is("java/lang/Class","getFields","()[Ljava/lang/reflect/Field;"))
+                && platformClass(call,program) && call.receiver() instanceof ClassValue owner && owner.exact()) {
+            boolean declared=call.call().target().name().equals("getDeclaredFields");String type=Values.type(owner.descriptor());
+            Query<List<FieldInfo>> query=program.reflectiveFields(type,declared,owner.loader(),Math.max(256,bindings.alternatives()));
+            List<Gap> pending=new ArrayList<>(Mechanisms.queryGaps(call,query));List<FieldInfo> fields=query.value().orElseThrow();
+            boolean platform=owner.descriptor().startsWith("L") && program.type(type,owner.loader()).filter(info -> info.role()==io.just.input.Inputs.Role.PLATFORM).isPresent()
+                    || fields.stream().anyMatch(field -> program.type(field.id().owner(),field.id().loader()).filter(info -> info.role()==io.just.input.Inputs.Role.PLATFORM).isPresent());
+            if(platform)pending.add(Mechanisms.gap(call,GapKind.DEPLOYMENT,"platform reflection field filtering depends on the target runtime"));
+            ObjectValue array=new ObjectValue(call.result().id(),"[Ljava/lang/reflect/Field;",true,"reflected field collection",false);
+            Atom length=pending.isEmpty()?new Literal(fields.size()):new Unknown("reflected field count is incomplete");
+            List<Effect> effects=new ArrayList<>();effects.add(new RequireNormal(pending));effects.add(new Write(array,new Length(),Value.of(length).requiring(pending)));
+            Set<Bound> members=new LinkedHashSet<>();int limit=bindings.alternatives();
+            for(FieldInfo field:fields) {
+                if(members.size()>=limit)break;
+                members.add(new Bound(new ReflectedField(field.id(),field.access()),call.path()));
+            }
+            if(!members.isEmpty()) {
+                List<Gap> order=new ArrayList<>(pending);order.add(Mechanisms.gap(call,GapKind.CONTROL_CONDITION,"reflection field array order is unspecified"));
+                effects.add(new Write(array,new Wildcard(),new Value(members).requiring(order)));
+            }
+            if(members.size()<fields.size())effects.add(new Observe(Kind.REFLECTION,"field collection member frontier",List.of(call.call().site()),List.of(Mechanisms.gap(call,GapKind.BUDGET,"field metadata member budget ("+limit+")"))));
+            effects.add(new Result(Value.of(array).requiring(pending)));return Optional.of(new Local(effects));
+        }
+        if(call.receiver() instanceof ReflectedField field && program.type("java/lang/reflect/Field").filter(info -> info.role()==io.just.input.Inputs.Role.PLATFORM).isPresent()) {
+            if(call.is("java/lang/reflect/Field","getName","()Ljava/lang/String;"))return Optional.of(Local.of(new RequireNormal(List.of()),Mechanisms.result(new Literal(field.field().name()))));
+            if(call.is("java/lang/reflect/Field","getModifiers","()I"))return Optional.of(Local.of(new RequireNormal(List.of()),Mechanisms.result(new Literal(field.access()))));
+            if(call.is("java/lang/reflect/Field","getType","()Ljava/lang/Class;"))return Optional.of(Local.of(new RequireNormal(List.of()),Mechanisms.result(new ClassValue(field.field().descriptor(),true,Optional.empty(),program.scope(Values.type(field.field().descriptor()),field.field().loader())))));
+            if(call.is("java/lang/reflect/Field","getDeclaringClass","()Ljava/lang/Class;"))return Optional.of(Local.of(new RequireNormal(List.of()),Mechanisms.result(new ClassValue("L"+field.field().owner()+";",true,Optional.empty(),field.field().loader()))));
+        }
         if(call.is("java/lang/Class","cast","(Ljava/lang/Object;)Ljava/lang/Object;") && platformClass(call,program) && call.receiver() instanceof ClassValue owner && owner.exact()) {
             Atom value=call.arguments().get(0);
             if(value instanceof Literal literal && literal.value()==null)return Optional.of(Local.of(new RequireNormal(List.of()),Mechanisms.result(value)));
@@ -59,7 +105,9 @@ final class Reflection implements Model {
                 }
             }
         }
-        if(call.is("java/lang/Class","getDeclaredField","(Ljava/lang/String;)Ljava/lang/reflect/Field;") && platformClass(call,program) && call.receiver() instanceof ClassValue owner && owner.exact()) {
+        if((call.is("java/lang/Class","getDeclaredField","(Ljava/lang/String;)Ljava/lang/reflect/Field;") || call.is("java/lang/Class","getField","(Ljava/lang/String;)Ljava/lang/reflect/Field;"))
+                && platformClass(call,program) && call.receiver() instanceof ClassValue owner && owner.exact()) {
+            boolean declared=call.call().target().name().equals("getDeclaredField");
             Atom name=call.arguments().get(0);
             if(name instanceof Literal literal && literal.value()==null)return Optional.of(Local.of(new Raise("java/lang/NullPointerException")));
             if(name instanceof Literal literal && literal.value() instanceof String text) {
@@ -69,16 +117,40 @@ final class Reflection implements Model {
                     List<Gap> pending=Mechanisms.queryGaps(call,definition);
                     return Optional.of(Local.of(new RequireNormal(pending),new Result(Value.of(new Unknown("field declaration is missing")).requiring(pending))));
                 }
-                boolean found=program.fields(type,owner.loader()).stream().anyMatch(field -> field.id().name().equals(text));
-                if(!found)return Optional.of(Local.of(new Raise("java/lang/NoSuchFieldException")));
+                List<FieldInfo> found=program.fields(type,owner.loader()).stream().filter(field -> field.id().name().equals(text) && (declared || (field.access() & Opcodes.ACC_PUBLIC)!=0)).toList();
+                if(found.isEmpty()) {
+                    if(declared)return Optional.of(Local.of(new Raise("java/lang/NoSuchFieldException")));
+                    return Optional.empty(); // Public fields can also be inherited.
+                }
+                if(found.size()!=1)return Optional.empty();
                 ObjectValue field=new ObjectValue(call.result().id(),"java/lang/reflect/Field",true,"declared field metadata",false);
-                return Optional.of(Local.of(new RequireNormal(List.of()),new Write(field,OVERRIDE,Value.of(new Literal(0))),Mechanisms.result(field)));
+                FieldInfo target=found.get(0);
+                return Optional.of(Local.of(new RequireNormal(List.of()),new Write(field,OVERRIDE,Value.of(new Literal(0))),
+                        new Write(field,new FieldTarget(),Value.of(new ReflectedField(target.id(),target.access()))),Mechanisms.result(field)));
             }
         }
         if(call.receiver() instanceof ObjectValue field && field.type().equals("java/lang/reflect/Field")
                 && Set.of("java/lang/reflect/Field","java/lang/reflect/AccessibleObject").contains(call.call().target().owner())
                 && program.lookup(call.call().target()).value().flatMap(method -> program.type(method.id().owner(),method.id().loader())).filter(type -> type.role()==io.just.input.Inputs.Role.PLATFORM).isPresent()) {
+            if(call.is("java/lang/reflect/Field","getBoolean","(Ljava/lang/Object;)Z")) {
+                List<Effect> choices=new ArrayList<>();boolean complete=true;
+                for(Bound binding:bindings.read(field,new FieldTarget()).under(call.path()).alternatives()) {
+                    if(!(binding.atom() instanceof ReflectedField target)){complete=false;break;}
+                    FieldId id=target.field();int required=Opcodes.ACC_PUBLIC|Opcodes.ACC_STATIC|Opcodes.ACC_FINAL;
+                    if(!id.descriptor().equals("Z") || (target.access() & required)!=required
+                            || program.type(id.owner(),id.loader()).filter(type -> (type.access() & Opcodes.ACC_PUBLIC)!=0).isEmpty()
+                            || program.declared(new MethodId(id.owner(),"<clinit>","()V",id.loader())).isPresent()){complete=false;break;}
+                    Optional<JvmConstant> constant=program.fieldConstant(id);
+                    if(constant.isPresent() && constant.get() instanceof LiteralConstant value && value.value() instanceof Integer number)
+                        choices.add(new Conditional(binding.path(),binding.gaps(),binding.dependencies(),Local.of(new Initialize(id.owner(),id.loader()),new RequireNormal(List.of()),Mechanisms.result(new Literal(number)))));
+                    else {complete=false;break;}
+                }
+                if(complete && !choices.isEmpty())return Optional.of(new Local(choices).onModelState());
+            }
             Value access=bindings.read(field,OVERRIDE).under(call.path());
+            if(call.is("java/lang/reflect/Field","set","(Ljava/lang/Object;Ljava/lang/Object;)V") && !access.empty()) {
+                Optional<Local> write=fieldWrite(call,field,access,bindings,program);if(write.isPresent())return write;
+            }
             if(!access.empty() && call.call().target().name().equals("isAccessible") && call.call().target().descriptor().equals("()Z"))
                 return Optional.of(Local.of(new RequireNormal(List.of()),new Result(access)));
             if(!access.empty() && call.call().target().name().equals("setAccessible") && call.call().target().descriptor().equals("(Z)V"))
@@ -86,6 +158,13 @@ final class Reflection implements Model {
                         new Write(field,OVERRIDE,Value.of(call.arguments().get(0))),new Result(Value.NULL)));
         }
         if (call.receiver() instanceof Reflected method) {
+            if(method.object()>=0 && Set.of("java/lang/reflect/Method","java/lang/reflect/AccessibleObject").contains(call.call().target().owner())) {
+                if(call.call().target().name().equals("setAccessible") && call.call().target().descriptor().equals("(Z)V"))
+                    return Optional.of(Local.of(new RequireNormal(List.of(Mechanisms.gap(call,GapKind.CONTROL_CONDITION,"access suppression requires the target platform permission and module policy"))),
+                            new Write(metadataObject(method),new MethodAccess(method.member()),Value.of(call.arguments().get(0))),new Result(Value.NULL)));
+                if(call.call().target().name().equals("isAccessible") && call.call().target().descriptor().equals("()Z"))
+                    return Optional.of(Local.of(new RequireNormal(List.of()),new Result(bindings.read(metadataObject(method),new MethodAccess(method.member())).under(call.path()))));
+            }
             if (call.is("java/lang/reflect/Method","getName","()Ljava/lang/String;")) return Optional.of(Local.of(Mechanisms.result(method.name())));
             if (call.is("java/lang/reflect/Method","getDeclaringClass","()Ljava/lang/Class;")) return Optional.of(Local.of(Mechanisms.result(method.declaringClass())));
             if (call.is("java/lang/reflect/Method","getParameterTypes","()[Ljava/lang/Class;")) return Optional.of(Local.of(Mechanisms.result(method.parameterTypes())));
@@ -113,16 +192,17 @@ final class Reflection implements Model {
         if(call.is("java/lang/Class","getMethods","()[Ljava/lang/reflect/Method;") || call.is("java/lang/Class","getDeclaredMethods","()[Ljava/lang/reflect/Method;")) {
             if(!(call.receiver() instanceof ClassValue owner) || !owner.exact())return Optional.of(Local.of(new Result(Value.of(new Unknown("method collection class is unspecified")).requiring(Mechanisms.unknown(call,"method collection requires the declaring Class")))));
             boolean declared=call.call().target().name().equals("getDeclaredMethods");Query<List<Method>> query=program.methods(Values.type(owner.descriptor()),declared,owner.loader());
-            List<Atom> values=new ArrayList<>();
+            List<Atom> values=new ArrayList<>();List<Effect> effects=new ArrayList<>();
             for(Method method:query.value().orElse(List.of())) {
                 List<Atom> signature=program.signature(method.id()).parameters().stream().map(t -> (Atom)new ClassValue(t.descriptor(),true,Optional.empty(),program.scope(Values.type(t.descriptor()),method.id().loader()))).toList();
-                values.add(new Reflected(new ClassValue("L"+method.id().owner()+";",true,Optional.empty(),method.id().loader()),new Literal(method.id().name()),new ArrayValue(call.result().id(),ArrayRole.METHOD_TYPES,"[Ljava/lang/Class;",signature),declared,call.call().site()));
+                Reflected value=new Reflected(new ClassValue("L"+method.id().owner()+";",true,Optional.empty(),method.id().loader()),new Literal(method.id().name()),new ArrayValue(call.result().id(),ArrayRole.METHOD_TYPES,"[Ljava/lang/Class;",signature),declared,call.call().site(),call.result().id(),values.size());
+                values.add(value);effects.add(initialAccess(value));
             }
             List<Gap> pending=Mechanisms.queryGaps(call,query),conditions=new ArrayList<>(pending);
             conditions.add(Mechanisms.gap(call,GapKind.CONTROL_CONDITION,"reflection method array order is unspecified"));
             ArrayValue snapshot=new ArrayValue(call.result().id(),ArrayRole.METHOD_COLLECTION,"[Ljava/lang/reflect/Method;",values,ArrayOrder.UNSPECIFIED,
                     query.pending().isEmpty()?ArrayExtent.EXACT:ArrayExtent.UNKNOWN,conditions);
-            return Optional.of(Local.of(new RequireNormal(pending),new Result(Value.of(snapshot).requiring(pending))));
+            effects.add(0,new RequireNormal(pending));effects.add(new Result(Value.of(snapshot).requiring(pending)));return Optional.of(new Local(effects));
         }
         if (call.is("java/lang/Class", "getMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;")
                 || call.is("java/lang/Class", "getDeclaredMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;")) {
@@ -134,7 +214,8 @@ final class Reflection implements Model {
             if (signatures.isEmpty()) {
                 Atom captured=snapshot(call,call.arguments().get(1));
                 Invocation lookupCall=new Invocation(call.call(),call.receiver(),List.of(call.arguments().get(0),captured),call.result(),call.path());
-                return Optional.of(lookupArrays.keeping(Local.of(new RequireNormal(Mechanisms.unknown(call,"lookup requires an existing member with this name and signature"),Optional.of(lookupCall)),Mechanisms.result(new Reflected(call.receiver(),call.arguments().get(0),captured,declared,call.call().site())))));
+                Reflected result=new Reflected(call.receiver(),call.arguments().get(0),captured,declared,call.call().site(),call.result().id(),0);
+                return Optional.of(lookupArrays.keeping(Local.of(new RequireNormal(Mechanisms.unknown(call,"lookup requires an existing member with this name and signature"),Optional.of(lookupCall)),initialAccess(result),Mechanisms.result(result))));
             }
             List<Effect> effects=new ArrayList<>();
             for (ArrayBinding signature:signatures) {
@@ -153,12 +234,14 @@ final class Reflection implements Model {
                     if (query.absent() || method.isPresent() && !sameSignature(method.get().id(),signature.elements(),program)) lookup=Local.of(new Raise("java/lang/NoSuchMethodException"));
                     else {
                         if (method.isPresent()) owner=new ClassValue("L"+method.get().id().owner()+";",true,Optional.empty(),method.get().id().loader());
-                        lookup=Local.of(new RequireNormal(Mechanisms.queryGaps(call,query)),new Result(Value.of(new Reflected(owner,call.arguments().get(0),new ArrayValue(call.result().id(),ArrayRole.METHOD_TYPES,"[Ljava/lang/Class;",signature.elements()),declared,call.call().site())).requiring(Mechanisms.queryGaps(call,query))));
+                        Reflected result=new Reflected(owner,call.arguments().get(0),new ArrayValue(call.result().id(),ArrayRole.METHOD_TYPES,"[Ljava/lang/Class;",signature.elements()),declared,call.call().site(),call.result().id(),0);
+                        lookup=Local.of(new RequireNormal(Mechanisms.queryGaps(call,query)),initialAccess(result),new Result(Value.of(result).requiring(Mechanisms.queryGaps(call,query))));
                     }
                 } else {
                     ArrayValue captured=new ArrayValue(call.result().id(),ArrayRole.METHOD_TYPES,"[Ljava/lang/Class;",signature.elements());
                     Invocation lookupCall=new Invocation(call.call(),owner,List.of(call.arguments().get(0),captured),call.result(),signature.path());
-                    lookup=Local.of(new RequireNormal(Mechanisms.unknown(call,"lookup requires an existing member with this name and signature"),Optional.of(lookupCall)),Mechanisms.result(new Reflected(owner,call.arguments().get(0),captured,declared,call.call().site())));
+                    Reflected result=new Reflected(owner,call.arguments().get(0),captured,declared,call.call().site(),call.result().id(),0);
+                    lookup=Local.of(new RequireNormal(Mechanisms.unknown(call,"lookup requires an existing member with this name and signature"),Optional.of(lookupCall)),initialAccess(result),Mechanisms.result(result));
                 }
                 effects.add(new Conditional(signature.path(),signature.gaps(),signature.dependencies(),lookup));
             }
@@ -168,6 +251,9 @@ final class Reflection implements Model {
         List<Gap> gaps = new ArrayList<>();
         if (!(call.receiver() instanceof Reflected reflected))
             return Optional.of(unresolved(call, List.of(Mechanisms.gap(call, GapKind.DYNAMIC_TARGET, "Method object has no verified lookup binding")), List.of()));
+        Value access=reflected.object()>=0?bindings.read(metadataObject(reflected),new MethodAccess(reflected.member())).under(call.path())
+                :Value.of(new Unknown("method access override is unspecified"),call.path());
+        if(access.empty())return Optional.of(Local.of(new Result(Value.BOTTOM)));
         List<Site> witnesses = List.of(reflected.lookup());
         if (!(reflected.declaringClass() instanceof ClassValue owner) || !owner.exact())
             gaps.add(Mechanisms.gap(call, GapKind.DYNAMIC_TARGET, "lookup class is not exact: " + reflected.declaringClass()));
@@ -180,25 +266,85 @@ final class Reflection implements Model {
         if (signatures.isEmpty()) gaps.add(Mechanisms.gap(call, GapKind.INPUT_BINDING, "exact Class[] parameter signature is not supplied"));
         else if(signatures.stream().anyMatch(signature -> signature.elements().stream().anyMatch(a -> !(a instanceof ClassValue type) || !type.exact())))gaps.add(Mechanisms.gap(call,GapKind.INPUT_BINDING,"parameter signature needs its actual Class values"));
         if (arguments.isEmpty()) gaps.add(Mechanisms.gap(call, GapKind.INPUT_BINDING, "same Object[] argument elements are not supplied"));
-        if (!gaps.isEmpty()) return Optional.of(signatureArrays.keeping(argumentArrays.keeping(conditionalTargets(call,reflected,signatures,arguments,gaps,witnesses,program))));
+        if (!gaps.isEmpty()) return Optional.of(signatureArrays.keeping(argumentArrays.keeping(conditionalTargets(call,reflected,signatures,arguments,gaps,witnesses,program,bindings.alternatives()))));
         List<Effect> effects = new ArrayList<>();
+        int combinations=0;
         for (ArrayBinding signature : signatures) for (ArrayBinding original : arguments) for(ArrayBinding args:adapt(call,original,signature.elements(),bindings,effects)) {
             Optional<Path> path = signature.path().and(args.path());
             if (path.isEmpty()) continue;
-            List<Gap> required = new ArrayList<>(signature.gaps()); required.addAll(args.gaps());
-            Set<Integer> dependencies = new LinkedHashSet<>(signature.dependencies()); dependencies.addAll(args.dependencies());
-            Local selected = invoke(call, reflected, signature.elements(), args.elements(), required, witnesses, program);
-            effects.add(new Conditional(path.get(), List.copyOf(required), Set.copyOf(dependencies), selected));
-            if (effects.size() > 64) {
-                Gap limit = Mechanisms.gap(call, GapKind.BUDGET, "reflective array combination budget (64)");
+            for(Bound flag:access.under(path.get()).alternatives()) {
+            if (combinations++ >= bindings.alternatives()) {
+                Gap limit = Mechanisms.gap(call, GapKind.BUDGET, "reflective array combination budget ("+bindings.alternatives()+")");
                 effects.add(new Conditional(call.path(), List.of(limit), Set.of(), unresolved(call,List.of(limit),witnesses)));
                 return Optional.of(signatureArrays.keeping(argumentArrays.keeping(new Local(effects))));
+            }
+            List<Gap> required = new ArrayList<>(signature.gaps()); required.addAll(args.gaps());required.addAll(flag.gaps());
+            Set<Integer> dependencies = new LinkedHashSet<>(signature.dependencies()); dependencies.addAll(args.dependencies());dependencies.addAll(flag.dependencies());
+            boolean known=flag.atom() instanceof Literal literal && (literal.value() instanceof Number || literal.value() instanceof Boolean);
+            boolean override=known && flag.atom() instanceof Literal literal && (Boolean.TRUE.equals(literal.value()) || literal.value() instanceof Number number && number.intValue()!=0);
+            Local selected = invoke(call, reflected, signature.elements(), args.elements(), required, witnesses, program,known,override);
+            effects.add(new Conditional(flag.path(), List.copyOf(required), Set.copyOf(dependencies), selected));
             }
         }
         return Optional.of(signatureArrays.keeping(argumentArrays.keeping(new Local(effects))));
     }
 
-    private Local conditionalTargets(Invocation call,Reflected reflected,List<ArrayBinding> signatures,List<ArrayBinding> arguments,List<Gap> missing,List<Site> witnesses,Program program) {
+    private Optional<Local> fieldWrite(Invocation call,ObjectValue field,Value access,Bindings bindings,Program program) {
+        Value targets=bindings.read(field,new FieldTarget()).under(call.path());if(targets.empty())return Optional.empty();
+        List<Effect> choices=new ArrayList<>();
+        for(Bound target:targets.alternatives())for(Bound flag:access.under(target.path()).alternatives()) {
+            if(!(target.atom() instanceof ReflectedField metadata) || !(flag.atom() instanceof Literal literal))return Optional.empty();
+            boolean override=Boolean.TRUE.equals(literal.value()) || literal.value() instanceof Number number && number.intValue()!=0;
+            if(!(literal.value() instanceof Boolean || literal.value() instanceof Number))return Optional.empty();
+            FieldId id=metadata.field();if((metadata.access() & (Opcodes.ACC_STATIC|Opcodes.ACC_FINAL))!=0)return Optional.empty();
+            Optional<ClassInfo> owner=program.type(id.owner(),id.loader());if(owner.isEmpty())return Optional.empty();
+            Query<Boolean> allowed=fieldAccess(metadata,call.call().site().method(),owner.orElseThrow(),program);
+            if(!override && (allowed.value().isEmpty() || !allowed.pending().isEmpty()))return Optional.empty();
+            List<Gap> gaps=new ArrayList<>(target.gaps());gaps.addAll(flag.gaps());Set<Integer> dependencies=new LinkedHashSet<>(target.dependencies());dependencies.addAll(flag.dependencies());
+            if(!override && allowed.value().equals(Optional.of(false))) {
+                choices.add(new Conditional(flag.path(),gaps,dependencies,Local.of(new Raise("java/lang/IllegalAccessException"))));continue;
+            }
+            Atom receiver=call.arguments().get(0);
+            if(receiver instanceof Literal nil && nil.value()==null) {
+                choices.add(new Conditional(flag.path(),gaps,dependencies,Local.of(new Raise("java/lang/NullPointerException"))));continue;
+            }
+            if(!(receiver instanceof ObjectValue instance))return Optional.empty();
+            Compatibility receiverMatch=compatible(instance,"L"+id.owner()+";",program,id.loader());
+            if(receiverMatch.match()==Match.INCOMPATIBLE) {
+                choices.add(new Conditional(flag.path(),gaps,dependencies,Local.of(new Raise("java/lang/IllegalArgumentException"))));continue;
+            }
+            List<Gap> normal=new ArrayList<>(Mechanisms.queryGaps(call,new Query<>(Optional.empty(),receiverMatch.pending())));
+            if(!instance.exact() || receiverMatch.match()==Match.UNKNOWN)normal.add(Mechanisms.gap(call,GapKind.INPUT_BINDING,"reflective field receiver must be nonnull and compatible"));
+            gaps.addAll(normal);
+            ArrayBinding input=new ArrayBinding(List.of(call.arguments().get(1)),flag.path(),List.copyOf(gaps),Set.copyOf(dependencies));
+            List<Effect> failures=new ArrayList<>();
+            for(ArrayBinding value:adapt(call,input,List.of(new ClassValue(id.descriptor(),true,Optional.empty(),program.scope(Values.type(id.descriptor()),id.loader()))),bindings,failures)) {
+                Atom content=value.elements().get(0);Compatibility match=compatible(content,id.descriptor(),program,id.loader());
+                List<Gap> required=new ArrayList<>(value.gaps());required.addAll(Mechanisms.queryGaps(call,new Query<>(Optional.empty(),match.pending())));
+                Local write;
+                if(match.match()==Match.INCOMPATIBLE)write=Local.of(new Raise("java/lang/IllegalArgumentException"));
+                else {
+                    List<Gap> completion=new ArrayList<>(normal);
+                    if(match.match()==Match.UNKNOWN) {Gap pending=Mechanisms.gap(call,GapKind.INPUT_BINDING,"reflective field value must be assignable");required.add(pending);completion.add(pending);}
+                    write=Local.of(new RequireNormal(completion),new Write(instance,new Field(id),Value.of(content,value.path()).requiring(required).tracing(value.dependencies())),new Result(Value.NULL));
+                }
+                choices.add(new Conditional(value.path(),required,value.dependencies(),write));
+            }
+            choices.addAll(failures);
+        }
+        return choices.isEmpty()?Optional.empty():Optional.of(new Local(choices).onModelState());
+    }
+
+    private Query<Boolean> fieldAccess(ReflectedField field,MethodId caller,ClassInfo owner,Program program) {
+        String name=owner.name(),from=caller.owner();
+        boolean samePackage=caller.loader()==owner.loader() && name.substring(0,Math.max(0,name.lastIndexOf('/'))).equals(from.substring(0,Math.max(0,from.lastIndexOf('/'))));
+        if((owner.access() & Opcodes.ACC_PUBLIC)==0 && !samePackage)return new Query<>(Optional.of(false),List.of());
+        if((field.access() & Opcodes.ACC_PRIVATE)!=0)return program.nestmates(from,caller.loader(),name,owner.loader());
+        if((field.access() & Opcodes.ACC_PUBLIC)!=0 || samePackage)return new Query<>(Optional.of(true),List.of());
+        return (field.access() & Opcodes.ACC_PROTECTED)!=0?new Query<>(Optional.empty(),List.of()):new Query<>(Optional.of(false),List.of());
+    }
+
+    private Local conditionalTargets(Invocation call,Reflected reflected,List<ArrayBinding> signatures,List<ArrayBinding> arguments,List<Gap> missing,List<Site> witnesses,Program program,int limit) {
         if(!(reflected.declaringClass() instanceof ClassValue) && Values.location(reflected.declaringClass()).isEmpty())
             return unresolved(call,missing,witnesses);
         if(reflected.declaringClass() instanceof ClassValue type && !type.exact() && type.source().isEmpty() && type.descriptor().equals("Ljava/lang/Object;"))
@@ -225,14 +371,14 @@ final class Reflection implements Model {
             List<ArrayBinding> supplied=arguments.stream().filter(args -> args.elements().size()==parameters.size()
                     && java.util.stream.IntStream.range(0,parameters.size()).allMatch(i -> compatible(args.elements().get(i),descriptors.get(i),program,method.id().loader()).match()!=Match.INCOMPATIBLE)).toList();
             if(matching.isEmpty() || !arguments.isEmpty() && supplied.isEmpty())continue;
-            if(examined++>=64){omitted=true;break;}
+            if(examined++>=limit){omitted=true;break;}
             List<MemberBinding> bindings=new ArrayList<>();
-            for(MemberBinding binding:memberBindings(call,reflected,method,program)) {
+            for(MemberBinding binding:memberBindings(call,reflected,method,program,limit)) {
                 Query<Method> lookup=program.reflect(Values.type(binding.lookup().descriptor()),method.id().name(),descriptors,reflected.declared(),binding.lookup().loader());
                 if(lookup.value().isPresent())bindings.add(binding);
                 else if(!lookup.pending().isEmpty()) {
                     GapKind kind=lookup.pending().stream().anyMatch(issue -> issue.cause()==QueryCause.BUDGET)?GapKind.BUDGET:GapKind.MISSING_DEPENDENCY;
-                    if(lookupFrontier.size()<64)lookupFrontier.add(Mechanisms.gap(call,kind,"candidate member lookup is unresolved: "+method.id()+" through "+binding.lookup().descriptor()+"; "+lookup.pending()));
+                    if(lookupFrontier.size()<limit)lookupFrontier.add(Mechanisms.gap(call,kind,"candidate member lookup is unresolved: "+method.id()+" through "+binding.lookup().descriptor()+"; "+lookup.pending()));
                     else omitted=true;
                 }
             }
@@ -247,10 +393,10 @@ final class Reflection implements Model {
                         continue;
                     }
                     for(MemberBinding binding:bindings) {
-                        if(variants.size()>=64){omitted=true;break methodVariants;}
+                        if(variants.size()>=limit){omitted=true;break methodVariants;}
                         List<Gap> gaps=new ArrayList<>(signature.gaps());gaps.addAll(args.gaps());
                         Set<Integer> dependencies=new LinkedHashSet<>(signature.dependencies());dependencies.addAll(args.dependencies());
-                        Reflected selected=new Reflected(binding.lookup(),new Literal(method.id().name()),new ArrayValue(call.result().id(),ArrayRole.METHOD_TYPES,"[Ljava/lang/Class;",parameters),reflected.declared(),reflected.lookup());
+                        Reflected selected=new Reflected(binding.lookup(),new Literal(method.id().name()),new ArrayValue(call.result().id(),ArrayRole.METHOD_TYPES,"[Ljava/lang/Class;",parameters),reflected.declared(),reflected.lookup(),reflected.object(),reflected.member());
                         List<Effect> candidate=new ArrayList<>();
                         if(unknownName)candidate.add(new Need(new InputNeed(reflected.name(),Optional.empty(),NeedKind.METHOD_NAME,"Ljava/lang/String;",List.of(new Literal(method.id().name())),"name required by "+method.id())));
                         if(!(reflected.declaringClass() instanceof ClassValue c && c.exact()))candidate.add(new Need(new InputNeed(reflected.declaringClass(),Optional.empty(),NeedKind.LOOKUP_TYPE,"Ljava/lang/Class;",List.of(selected.declaringClass()),"lookup Class required by "+method.id())));
@@ -268,19 +414,19 @@ final class Reflection implements Model {
                 }
             }
             if(!variants.isEmpty()) {
-                if(families.size()>=64){omitted=true;break candidates;}
+                if(families.size()>=limit){omitted=true;break candidates;}
                 Optional<MemberFamily> batch=Mechanisms.impact(method.id())?Optional.of(new MemberFamily(method.id().owner(),method.id().name(),method.id().loader())):Optional.empty();
                 families.add(new MemberChoices(batch,variants));
             }
         }
         ArrayDeque<MemberChoices> pending=new ArrayDeque<>(families);Map<MemberFamily,Integer> batches=new HashMap<>();int nextBatch=0;
-        while(!pending.isEmpty() && count<64) {
+        while(!pending.isEmpty() && count<limit) {
             MemberChoices family=pending.removeFirst();int batch;
             if(family.batch().isEmpty())batch=nextBatch++;
             else {Integer known=batches.get(family.batch().get());if(known==null){batch=nextBatch++;batches.put(family.batch().get(),batch);}else batch=known;}
             effects.add(new Alternative(count++,batch,family.choices().removeFirst()));if(!family.choices().isEmpty())pending.addLast(family);
         }
-        if(omitted || !pending.isEmpty())frontier(effects,List.of(Mechanisms.gap(call,GapKind.BUDGET,"conditional reflected target frontier (64)")),witnesses);
+        if(omitted || !pending.isEmpty())frontier(effects,List.of(Mechanisms.gap(call,GapKind.BUDGET,"conditional reflected target frontier ("+limit+")")),witnesses);
         if(!lookupFrontier.isEmpty())frontier(effects,List.copyOf(lookupFrontier),witnesses);
         for(InputNeed producer:producers.values()) {
             Gap gap=Mechanisms.gap(call,GapKind.INPUT_BINDING,producer.reason());
@@ -297,7 +443,7 @@ final class Reflection implements Model {
 
     private static boolean serialized(Atom atom){return Values.source(atom).stream().flatMap(s -> s.path().stream()).anyMatch(s -> s instanceof Decoded);}
     private record MemberBinding(ClassValue lookup,Optional<ClassValue> receiver) {}
-    private List<MemberBinding> memberBindings(Invocation call,Reflected reflected,Method method,Program program) {
+    private List<MemberBinding> memberBindings(Invocation call,Reflected reflected,Method method,Program program,int limit) {
         Optional<InputLocation> runtimeSource=Values.location(reflected.declaringClass()).filter(s -> !s.path().isEmpty() && s.path().get(s.path().size()-1) instanceof RuntimeClass);
         List<ClassValue> lookups;
         if(reflected.declaringClass() instanceof ClassValue exact && exact.exact())lookups=List.of(exact);
@@ -309,10 +455,10 @@ final class Reflection implements Model {
             if(reflected.declaringClass() instanceof ClassValue type && program.assignable(Values.type(type.descriptor()),type.loader(),owner,loader).value().equals(Optional.of(true))){owner=Values.type(type.descriptor());loader=type.loader();}
             lookups=List.of(new ClassValue(owner.startsWith("[")?owner:"L"+owner+";",true,Optional.empty(),loader));
         }
-        if(method.isStatic())return lookups.stream().limit(65).map(type -> new MemberBinding(type,Optional.empty())).toList();
+        if(method.isStatic())return lookups.stream().limit((long)limit+1).map(type -> new MemberBinding(type,Optional.empty())).toList();
         Atom receiver=call.arguments().get(0);
         if(!(receiver instanceof ObjectValue || receiver instanceof Symbolic || receiver instanceof ExternalValue || receiver instanceof UnboundValue))
-            return lookups.stream().limit(65).map(type -> new MemberBinding(type,Optional.empty())).toList();
+            return lookups.stream().limit((long)limit+1).map(type -> new MemberBinding(type,Optional.empty())).toList();
         String upper=runtimeType(receiver).orElse(receiver instanceof Symbolic symbolic?symbolic.type():"java/lang/Object");
         boolean exact=runtimeType(receiver).isPresent() && !(receiver instanceof ObjectValue object && !object.exact());
         List<ClassValue> receivers=runtimeTypes(upper,receiver instanceof ObjectValue object?object.loader():receiver instanceof Symbolic symbolic?symbolic.loader():0,exact,method.id().owner(),method.id().loader(),serialized(receiver),program);
@@ -320,8 +466,8 @@ final class Reflection implements Model {
         List<MemberBinding> result=new ArrayList<>();
         if(same) {
             Map<Program.DefinedType,ClassValue> actuals=new HashMap<>();for(ClassValue actual:receivers)actuals.put(new Program.DefinedType(Values.type(actual.descriptor()),actual.loader()),actual);
-            for(ClassValue lookup:lookups){ClassValue actual=actuals.get(new Program.DefinedType(Values.type(lookup.descriptor()),lookup.loader()));if(actual!=null){result.add(new MemberBinding(lookup,Optional.of(actual)));if(result.size()>=65)break;}}
-        } else pairs:for(ClassValue lookup:lookups)for(ClassValue actual:receivers){result.add(new MemberBinding(lookup,Optional.of(actual)));if(result.size()>=65)break pairs;}
+            for(ClassValue lookup:lookups){ClassValue actual=actuals.get(new Program.DefinedType(Values.type(lookup.descriptor()),lookup.loader()));if(actual!=null){result.add(new MemberBinding(lookup,Optional.of(actual)));if(result.size()>limit)break;}}
+        } else pairs:for(ClassValue lookup:lookups)for(ClassValue actual:receivers){result.add(new MemberBinding(lookup,Optional.of(actual)));if(result.size()>limit)break pairs;}
         return List.copyOf(result);
     }
     private List<ClassValue> runtimeTypes(String upper,int upperLoader,boolean exact,String owner,int ownerLoader,boolean serialized,Program program) {
@@ -371,7 +517,7 @@ final class Reflection implements Model {
     }
 
     private Local invoke(Invocation call, Reflected reflected, List<Atom> signature, List<Atom> arguments,
-                         List<Gap> required, List<Site> witnesses, Program program) {
+                         List<Gap> required, List<Site> witnesses, Program program,boolean accessKnown,boolean override) {
         if (signature.stream().anyMatch(a -> !(a instanceof ClassValue c) || !c.exact()))
             return unresolved(call,List.of(Mechanisms.gap(call, GapKind.INPUT_BINDING,"parameter signature is not exact")),witnesses);
         String name = (String) ((Literal) reflected.name()).value();
@@ -382,6 +528,12 @@ final class Reflection implements Model {
         if(!sameSignature(target.orElseThrow().id(),signature,program))return Local.of(new Raise("java/lang/NoSuchMethodException"));
         if (arguments.size()!=descriptors.size()) return Local.of(new Raise("java/lang/IllegalArgumentException"));
         List<Gap> gaps = new ArrayList<>(required); gaps.addAll(Mechanisms.queryGaps(call,query));
+        Optional<ClassInfo> owner=program.type(target.orElseThrow().id().owner(),target.orElseThrow().id().loader());
+        Query<Boolean> allowed=owner.map(type -> methodAccess(target.orElseThrow(),call.call().site().method(),type,program)).orElseGet(() -> new Query<>(Optional.empty(),query.pending()));
+        gaps.addAll(Mechanisms.queryGaps(call,allowed));
+        if(accessKnown && !override && allowed.value().equals(Optional.of(false)))return Local.of(new Raise("java/lang/IllegalAccessException"));
+        if(!override && !allowed.value().equals(Optional.of(true)))gaps.add(Mechanisms.gap(call,GapKind.INPUT_BINDING,accessKnown?"reflective method access is unresolved":"reflective access override must permit this method"));
+        if(override)gaps.add(Mechanisms.gap(call,GapKind.CONTROL_CONDITION,"method access suppression must be permitted"));
         for (int i=0;i<descriptors.size();i++) {
             Compatibility compatibility=compatible(arguments.get(i),descriptors.get(i),program,target.get().id().loader());
             gaps.addAll(Mechanisms.queryGaps(call,new Query<>(Optional.empty(),compatibility.pending())));
@@ -410,15 +562,23 @@ final class Reflection implements Model {
                 }
             }
         }
-        if (!selected.isPublic()) gaps.add(Mechanisms.gap(call,GapKind.INPUT_BINDING,"non-public reflective access has not been established"));
-        // Access is checked against the lookup member, before virtual dispatch to an override.
-        // A public superclass/interface Method may legally dispatch to a nonpublic implementation.
-        String declaring=target.get().id().owner(),caller=call.call().site().method().owner();
-        if(program.type(declaring,target.get().id().loader()).map(c -> (c.access() & Opcodes.ACC_PUBLIC)==0).orElse(false)
-                && !declaring.substring(0,Math.max(0,declaring.lastIndexOf('/'))).equals(caller.substring(0,Math.max(0,caller.lastIndexOf('/')))))
-            gaps.add(Mechanisms.gap(call,GapKind.INPUT_BINDING,"reflective access to the non-public declaring class has not been established: "+declaring));
-        return Local.of(new Dispatch(selected.id(),receiver,arguments,Kind.REFLECTION,gaps.isEmpty()?Evidence.PROVEN:Evidence.CONDITIONAL,witnesses,List.copyOf(gaps),ReturnFlow.TO_RESULT,ExceptionFlow.REFLECTED),
+        Local accepted=Local.of(new Dispatch(selected.id(),receiver,arguments,Kind.REFLECTION,gaps.isEmpty()?Evidence.PROVEN:Evidence.CONDITIONAL,witnesses,List.copyOf(gaps),ReturnFlow.TO_RESULT,ExceptionFlow.REFLECTED),
                 new Observe(Kind.REFLECTION,"resolved reflective target " + selected.id(),witnesses,List.copyOf(gaps)));
+        return !override && !allowed.value().equals(Optional.of(true))
+                ?Local.of(new Alternative(0,Local.of(new Raise("java/lang/IllegalAccessException"))),new Alternative(1,accepted)):accepted;
+    }
+
+    private static ObjectValue metadataObject(Reflected method){return new ObjectValue(method.object(),"java/lang/reflect/Method",true,"method metadata",false);}
+    private static Write initialAccess(Reflected method){return new Write(metadataObject(method),new MethodAccess(method.member()),Value.of(new Literal(0)));}
+    private Query<Boolean> methodAccess(Method method,MethodId caller,ClassInfo owner,Program program) {
+        String name=owner.name(),from=caller.owner();
+        boolean samePackage=caller.loader()==owner.loader() && name.substring(0,Math.max(0,name.lastIndexOf('/'))).equals(from.substring(0,Math.max(0,from.lastIndexOf('/'))));
+        if((owner.access() & Opcodes.ACC_PUBLIC)==0 && !samePackage)return new Query<>(Optional.of(false),List.of());
+        if((method.access() & Opcodes.ACC_PRIVATE)!=0)return program.nestmates(from,caller.loader(),name,owner.loader());
+        if(method.isPublic() || samePackage)return new Query<>(Optional.of(true),List.of());
+        if((method.access() & Opcodes.ACC_PROTECTED)==0)return new Query<>(Optional.of(false),List.of());
+        Query<Boolean> subclass=program.assignable(from,caller.loader(),name,owner.loader());
+        return subclass.value().equals(Optional.of(false)) && subclass.pending().isEmpty()?subclass:new Query<>(Optional.empty(),subclass.pending());
     }
 
     private static Local unresolved(Invocation call,List<Gap> gaps,List<Site> witnesses) {

@@ -6,7 +6,10 @@ import java.util.*;
 /** Immutable bindings exchanged with local models. Heap and scheduling remain in analysis. */
 public final class Values {
     private Values() {}
-    public sealed interface Atom permits Literal, ObjectValue, ClassValue, Reflected, ConstructorValue, LambdaValue, ProxyValue, ArrayValue, CollectionView, MapEntryValue, LoaderValue, HttpServerValue, Unknown, Symbolic, Truncated, LookupValue, MethodTypeValue, MethodHandleValue, ExternalValue, NormalValue, UnboundValue, StringPrefix, StringConcat, Bytecode {}
+    public sealed interface Atom permits Literal, ObjectValue, ClassValue, RuntimeTypes, Reflected, ReflectedField, ConstructorValue, LambdaValue, ProxyValue, ArrayValue, CollectionView, MapEntryValue, LoaderValue, HttpServerValue, Unknown, Symbolic, Truncated, LookupValue, MethodTypeValue, MethodHandleValue, ExternalValue, NormalValue, UnboundValue, StringPrefix, StringConcat, InstanceTest, Bytecode {}
+    /** A JVM instanceof result retains the tested value until a branch can refine it. */
+    public record InstanceTest(Atom receiver,String type,int loader) implements Atom {}
+    public record ReflectedField(FieldId field,int access) implements Atom {}
     /** Borrows read-only class bytes from the scan. Reports retain their source and length. */
     public static final class Bytecode implements Atom {
         private final String name,source;private final int length;private final transient byte[] bytes;
@@ -50,7 +53,13 @@ public final class Values {
         public ClassValue(String descriptor,boolean exact,Optional<? extends InputLocation> source){this(descriptor,exact,source.map(s -> (InputLocation)s),0);}
         public ClassValue(String descriptor,boolean exact){this(descriptor,exact,Optional.empty());}
     }
-    public record Reflected(Atom declaringClass, Atom name, Atom parameterTypes, boolean declared, Site lookup) implements Atom {}
+    /** A finite disjunction of exact runtime classes for one object identity. */
+    public record RuntimeTypes(List<ClassValue> members) implements Atom {
+        public RuntimeTypes {members=List.copyOf(new LinkedHashSet<>(members));if(members.isEmpty() || members.stream().anyMatch(type -> !type.exact()))throw new IllegalArgumentException("runtime type set requires exact classes");}
+    }
+    public record Reflected(Atom declaringClass, Atom name, Atom parameterTypes, boolean declared, Site lookup,int object,int member) implements Atom {
+        public Reflected(Atom declaringClass,Atom name,Atom parameterTypes,boolean declared,Site lookup){this(declaringClass,name,parameterTypes,declared,lookup,-1,0);}
+    }
     public record ConstructorValue(int id,Atom declaringClass,ArrayValue parameterTypes,boolean declared,Site lookup) implements Atom {}
     public record LookupValue(String caller,boolean publicOnly,Site source) implements Atom {}
     public record MethodTypeValue(ClassValue returned,List<ClassValue> parameters) implements Atom {
@@ -149,11 +158,21 @@ public final class Values {
             return new Selection(chosen,combined,narrowed);
         }
         private Atom commonValue(Selection other) {
-            Atom chosen=value;
+            Atom chosen;
             boolean left=value instanceof Symbolic || value instanceof ExternalValue || value instanceof UnboundValue,right=other.value instanceof Symbolic || other.value instanceof ExternalValue || other.value instanceof UnboundValue;
-            if(!left && !right && !value.equals(other.value))return null;
-            if(left && !right)chosen=other.value;
-            if(value instanceof Symbolic first && first.type().equals("java/lang/Object") && other.value instanceof Symbolic)chosen=other.value;
+            if(value instanceof RuntimeTypes first && other.value instanceof RuntimeTypes second) {
+                Set<ClassValue> allowed=new HashSet<>(second.members());List<ClassValue> common=first.members().stream().filter(allowed::contains).toList();
+                if(common.isEmpty())return null;chosen=common.size()==1?common.get(0):common.equals(first.members())?first:new RuntimeTypes(common);
+            } else if(value instanceof RuntimeTypes types && other.value instanceof ClassValue type) {
+                if(!types.members().contains(type))return null;chosen=type;
+            } else if(value instanceof ClassValue type && other.value instanceof RuntimeTypes types) {
+                if(!types.members().contains(type))return null;chosen=type;
+            } else {
+                chosen=value;
+                if(!left && !right && !value.equals(other.value))return null;
+                if(left && !right)chosen=other.value;
+                if(value instanceof Symbolic first && first.type().equals("java/lang/Object") && other.value instanceof Symbolic)chosen=other.value;
+            }
             if(range.isEmpty() && other.range.isEmpty())return chosen;
             long low=Math.max(range.isPresent()?range.get().minimum():Long.MIN_VALUE,other.range.isPresent()?other.range.get().minimum():Long.MIN_VALUE);
             long high=Math.min(range.isPresent()?range.get().maximum():Long.MAX_VALUE,other.range.isPresent()?other.range.get().maximum():Long.MAX_VALUE);
@@ -354,7 +373,7 @@ public final class Values {
             return new Value(result);
         }
     }
-    public sealed interface Slot permits Field, SerializedField, FieldPresence, ClassData, SerializedIndex, SerializedKey, SerializedValue, Index, Wildcard, Elements, MapEntries, MapValues, MapKey, KeyIndex, KeyComparison, Mutation, Length, Content, Decoded, RuntimeClass, NamedClass, Cursor, StreamCursor, StreamRead, HookReceiver, HookOwner, FieldsRead, ActiveObject, ResolvedObject, IterationOrder, DefinedClass, FactoryName {}
+    public sealed interface Slot permits Field, SerializedField, FieldPresence, ClassData, SerializedIndex, SerializedKey, SerializedValue, Index, Wildcard, Elements, MapEntries, MapValues, MapKey, KeyIndex, KeyComparison, Mutation, Length, Content, DecoderKind, FieldTarget, MethodAccess, Decoded, RuntimeClass, NamedClass, Cursor, StreamCursor, StreamRead, HookReceiver, HookOwner, FieldsRead, ActiveObject, ResolvedObject, IterationOrder, DefinedClass, FactoryName {}
     public record Mutation() implements Slot {}
     public record KeyComparison(Atom incoming,Atom existing) implements Slot {}
     public record DefinedClass(int index) implements Slot {}
@@ -377,6 +396,9 @@ public final class Values {
     public record KeyIndex(Atom key) implements Slot {}
     public record Length() implements Slot {}
     public record Content() implements Slot {}
+    public record DecoderKind() implements Slot {}
+    public record FieldTarget() implements Slot {}
+    public record MethodAccess(int member) implements Slot {}
     /** Actual overridden Reference getter result at one NamingManager invocation. */
     public record FactoryName() implements Slot {}
     public record Decoded() implements Slot {}

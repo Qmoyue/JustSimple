@@ -14,8 +14,17 @@ final class HeapStore {
     record Read(Value value,Set<Cell> dependencies) {}
     record Reachable(List<ObjectValue> objects,Set<Cell> dependencies,int consumed,boolean truncated) {}
     private record Frame(int context,int instruction,int iteration,List<Integer> effects) {}
+    private record Graph(List<Edge> edges) {
+        @Override public int hashCode(){return System.identityHashCode(edges);}
+        @Override public boolean equals(Object other){return other instanceof Graph graph && graph.edges==edges;}
+    }
+    private record ReadKey(int object,String type,Slot slot,ExecutionPoint point,Site site,Path path,boolean ownWrites,Graph graph) {}
+    private record CachedRead(long objectVersion,long conditionsVersion,int definitions,List<Edge> cfg,Read read) {}
+    private static final int READ_CACHE_LIMIT=8192;
     private final Map<Integer,Map<Slot,Map<ExecutionPoint,Value>>> objects=new LinkedHashMap<>();
     private final Map<Integer,List<Frame>> ancestry=new HashMap<>();
+    private final Map<Integer,Long> versions=new HashMap<>();
+    private final Map<ReadKey,CachedRead> cachedReads=new LinkedHashMap<>();
     private final Set<String> limitations=new LinkedHashSet<>();
     private final Conditions conditions;
     private final Program program;
@@ -27,26 +36,43 @@ final class HeapStore {
     }
     void context(int id,int parent,int instruction,int iteration,List<Integer> effects) {
         List<Frame> path=new ArrayList<>(parent<0?List.of():ancestry.get(parent));
-        path.add(new Frame(id,instruction,iteration,effects));ancestry.put(id,List.copyOf(path));
+        path.add(new Frame(id,instruction,iteration,effects));if(ancestry.put(id,List.copyOf(path))!=null)cachedReads.clear();
     }
     void seed(ObjectValue object,Slot slot,Value value) {
-        writes(object,slot).merge(new ExecutionPoint(-1,-1),value,Value::merge);
+        Map<ExecutionPoint,Value> writes=writes(object,slot);ExecutionPoint point=new ExecutionPoint(-1,-1);
+        Value old=writes.get(point),joined=writes.merge(point,value,Value::merge);
+        if(!Objects.equals(old,joined))versions.merge(object.id(),1L,Long::sum);
     }
     boolean write(ObjectValue object,Slot slot,ExecutionPoint writer,Value value,Site site) {
         Map<ExecutionPoint,Value> writes=writes(object,slot);
         Value old=writes.getOrDefault(writer,Value.BOTTOM),joined=bounded(old.merge(value),site);
-        if(old.equals(joined))return false;writes.put(writer,joined);return true;
+        if(old.equals(joined))return false;writes.put(writer,joined);versions.merge(object.id(),1L,Long::sum);return true;
     }
     /** Same-object producer candidates; callers must still use read() for temporal/path semantics. */
     private Map<Slot,Map<ExecutionPoint,Value>> slots(ObjectValue object){return objects.getOrDefault(object.id(),Map.of());}
     private Map<ExecutionPoint,Value> writes(ObjectValue object,Slot slot) {
-        return objects.computeIfAbsent(object.id(),key -> new LinkedHashMap<>()).computeIfAbsent(slot,key -> new LinkedHashMap<>());
+        return objects.computeIfAbsent(object.id(),key -> new LinkedHashMap<>()).computeIfAbsent(slot,key -> {
+            versions.merge(object.id(),1L,Long::sum);return new LinkedHashMap<>();
+        });
     }
     List<ExecutionPoint> writers(ObjectValue object,Slot slot){return List.copyOf(slots(object).getOrDefault(slot,Map.of()).keySet());}
     Read read(ObjectValue object,Slot slot,Use use) {
+        Map<Slot,Map<ExecutionPoint,Value>> slots=slots(object);
+        int writes=slots.getOrDefault(slot,Map.of()).size()+slots.getOrDefault(new Mutation(),Map.of()).size();
+        if(slot instanceof Index)writes+=slots.getOrDefault(new Wildcard(),Map.of()).size();
+        if(writes<16 && (!(slot instanceof Elements) || slots.size()<16)) {
+            Set<Cell> dependencies=new LinkedHashSet<>();Value value=read(object,slot,use,dependencies);
+            return new Read(value,Set.copyOf(dependencies));
+        }
+        ReadKey key=new ReadKey(object.id(),object.type(),slot,use.point(),use.site(),use.path(),use.ownWrites(),new Graph(use.cfg()));
+        long version=versions.getOrDefault(object.id(),0L),condition=conditions.revision();int definitions=program.definitionCount();
+        CachedRead cached=cachedReads.get(key);
+        if(cached!=null && cached.objectVersion()==version && cached.conditionsVersion()==condition && cached.definitions()==definitions && cached.cfg().equals(use.cfg()))return cached.read();
         Set<Cell> dependencies=new LinkedHashSet<>();
         Value value=read(object,slot,use,dependencies);
-        return new Read(value,Set.copyOf(dependencies));
+        Read result=new Read(value,Set.copyOf(dependencies));
+        if(cached==null && cachedReads.size()>=READ_CACHE_LIMIT)cachedReads.remove(cachedReads.keySet().iterator().next());
+        cachedReads.put(key,new CachedRead(version,condition,definitions,List.copyOf(use.cfg()),result));return result;
     }
     /** Visible mutable references only; serialized source slots and model bookkeeping are not live fields. */
     Reachable reachable(List<Atom> roots,Use use,int allowance) {
@@ -146,7 +172,7 @@ final class HeapStore {
     private static boolean mutable(ObjectValue object,Slot slot) {
         // Array length belongs to the identity; opaque calls can only change its contents.
         if(slot instanceof Length && object.type().startsWith("["))return false;
-        return slot instanceof Field || slot instanceof Index || slot instanceof Wildcard || slot instanceof Length || slot instanceof Content
+        return slot instanceof Field || slot instanceof MethodAccess || slot instanceof Index || slot instanceof Wildcard || slot instanceof Length || slot instanceof Content
                 || slot instanceof Elements || slot instanceof MapKey || slot instanceof MapValues || slot instanceof KeyIndex
                 || slot instanceof IterationOrder || slot instanceof Cursor || slot instanceof StreamCursor;
     }

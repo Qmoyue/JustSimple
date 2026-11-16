@@ -30,9 +30,12 @@ class ReportBindingsTest {
         Finding finding=new Finding(0,entry,Kind.REFLECTION,List.of(0),List.of(),List.of(gap),path,"finite choice",List.of(new ProofUse(0,0)));
         ScanResult result=new ScanResult(Mode.COMPONENT,Execution.FINISHED,Outcome.FINDINGS,
                 new Inputs.Summary(List.of(),Inputs.Limits.defaults(),0,0,0,0,0,17,List.of(),List.of()),Optional.empty(),Analyzer.Limits.defaults(),20000,
-                List.of(entry),List.of(),List.of(relation),List.of(finding),List.of(),List.of(),new Statistics(0,1,1,0,1,1,0,false,0,0,0,0,0,0,0),List.of(),List.of(),List.of());
+                List.of(entry),List.of(),List.of(relation),List.of(finding),List.of(),List.of(),new Statistics(0,1,1,0,1,1,0,false,0,0,0,0,0,0,0),List.of(),List.of(),List.of(),List.of(new QueryIssue(QueryCause.BUDGET,"ranking metadata limit")));
         var output=temp.resolve("finite");Reports.write(result,output);String markdown=Files.readString(output.resolve("report.md"));
         assertTrue(markdown.contains("Path conditions: C"));assertTrue(markdown.contains("S0 selects V"));
+        assertTrue(markdown.contains("Ranking guidance incomplete: ranking metadata limit"));
+        JsonObject json=JsonParser.parseString(Files.readString(output.resolve("report.json"))).getAsJsonObject();
+        assertEquals("FINISHED",json.get("execution").getAsString());assertEquals("ranking metadata limit",json.getAsJsonArray("rankingIssues").get(0).getAsJsonObject().get("detail").getAsString());
     }
     @Test void bothReportsRetainNestedTypesBindingsAndTheChosenAlternativeSupport()throws Exception {
         MethodId method=new MethodId("ReportFixture","run","()V");Site site=new Site(method,1,2,"fixture.class");
@@ -58,7 +61,7 @@ class ReportBindingsTest {
         InputRequirement need=new InputRequirement(0,method,0,site,path,Optional.of(source),new InputNeed(new ExternalValue("Ljava/lang/String;",source),Optional.empty(),NeedKind.METHOD_NAME,"Ljava/lang/String;",List.of(new Literal("run")),"selected member"),List.of(0));
         ScanResult result=new ScanResult(Mode.COMPONENT,Execution.FINISHED,Outcome.FINDINGS,
                 new Inputs.Summary(List.of(),Inputs.Limits.defaults(),0,0,0,0,0,17,List.of(),List.of()),Optional.empty(),Analyzer.Limits.defaults(),20_000,
-                List.of(entry),List.of(),List.of(relation),List.of(finding),List.of(),List.of(),new Statistics(0,1,1,0,1,1,0,false,0,0,0,0,0,0,0),List.of(need),List.of(),List.of());
+                List.of(entry),List.of(),List.of(relation),List.of(finding),List.of(),List.of(),new Statistics(0,1,1,0,1,1,0,false,0,0,0,0,0,0,0),List.of(need),List.of(),List.of(),List.of());
         var output=temp.resolve("reports");Reports.write(result,output);
         JsonObject json=JsonParser.parseString(Files.readString(output.resolve("report.json"))).getAsJsonObject();
         JsonArray values=json.getAsJsonObject("references").getAsJsonArray("values");JsonObject reported=json.getAsJsonArray("relations").get(0).getAsJsonObject();

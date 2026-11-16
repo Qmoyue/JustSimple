@@ -109,6 +109,7 @@ final class References {
     int value(Atom atom) {
         Integer old=values.get(atom);if(old!=null)return old;int result=id(values,atom);
         if(atom instanceof Reflected r){value(r.declaringClass());value(r.name());value(r.parameterTypes());site(r.lookup());}
+        else if(atom instanceof RuntimeTypes types)types.members().forEach(this::value);
         else if(atom instanceof ConstructorValue c){value(c.declaringClass());value(c.parameterTypes());site(c.lookup());}
         else if(atom instanceof ArrayValue array){array.elements().forEach(this::value);array.conditions().forEach(this::gap);}
         else if(atom instanceof LambdaValue lambda){lambda.captured().forEach(this::value);site(lambda.factory());}
@@ -116,6 +117,7 @@ final class References {
         else if(atom instanceof UnboundValue unbound)value(unbound.original());
         else if(atom instanceof StringPrefix prefix)value(prefix.suffix());
         else if(atom instanceof StringConcat sequence)sequence.pieces().forEach(this::value);
+        else if(atom instanceof InstanceTest test)value(test.receiver());
         else if(atom instanceof MethodTypeValue type){value(type.returned());type.parameters().forEach(this::value);}
         else if(atom instanceof CollectionView view){value(view.source());slot(view.elements());}
         else if(atom instanceof MapEntryValue entry){value(entry.source());value(entry.key());}
@@ -150,7 +152,7 @@ final class References {
         out.name("inputRequirements").beginArray();for(var need:result.inputRequirements())indexed.toJson(need,need.getClass(),out);out.endArray();
         out.name("demandFrontier").beginArray();for(var frontier:result.demandFrontier())indexed.toJson(frontier,frontier.getClass(),out);out.endArray();
         out.name("breakpoints").beginArray();for(var point:result.breakpoints())indexed.toJson(point,point.getClass(),out);out.endArray();
-        field(out,"limitations",result.limitations());field(out,"missingClasses",result.missingClasses());field(out,"statistics",result.statistics());
+        field(out,"limitations",result.limitations());field(out,"rankingIssues",result.rankingIssues());field(out,"missingClasses",result.missingClasses());field(out,"statistics",result.statistics());
         for(var relation:result.relations())relation.slot().ifPresent(this::slot);
         for(var requirement:result.inputRequirements()){requirement.source().ifPresent(this::source);requirement.needed().slot().ifPresent(this::slot);}
         out.name("references").beginObject();

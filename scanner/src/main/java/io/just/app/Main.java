@@ -79,11 +79,11 @@ public final class Main {
     private static ScanResult analyze(Options options,PrintStream progress,long started) throws IOException {
         progress.println("[read] Indexing input: " + options.input().toAbsolutePath());progress.flush();
         try (Inputs inputs = Inputs.open(options.input(), options.dependencies(), options.jdk(), options.inputLimits())) {
-            Program program = new Program(inputs, options.methodInstructions());
+            Program program = new Program(inputs,options.methodInstructions(),Math.max(Program.DEFAULT_SCAN_INSTRUCTION_LIMIT,options.analysisLimits().steps()));
             Inputs.Summary input=inputs.summary();
             progress.printf(Locale.ROOT,"[read] classes=%d dependencies=%d target-jdk=%d%n",input.applicationClasses(),input.dependencyClasses(),input.jdkFeature());
             Catalog catalog = options.guidance() ? Catalog.builtin() : Catalog.empty();
-            Mechanisms knowledge = new Mechanisms(program, catalog, options.sinks());
+            Mechanisms knowledge = new Mechanisms(program, catalog, options.sinks(),options.analysisLimits().alternatives());
             Optional<StaticData> facts = options.facts().isPresent()
                     ? Optional.of(StaticData.read(options.facts().get())) : Optional.empty();
             Analyzer analyzer = new Analyzer(program, knowledge, options.analysisLimits(), options.demandGuidance());

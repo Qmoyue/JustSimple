@@ -13,6 +13,33 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class HeapStoreTest {
     @TempDir Path temp;
+    @Test void repeatedReadsFollowChangedConditionsAndLoopEdges()throws Exception {
+        Path classes=io.just.BytecodeFixtures.compile(temp,8,Map.of("HeapFixture.java","public class HeapFixture {}"));
+        try(Inputs inputs=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {
+            Program program=new Program(inputs,20000);Conditions conditions=new Conditions(program,new io.just.knowledge.Mechanisms(program));
+            HeapStore heap=new HeapStore(program,conditions,64);heap.context(0,-1,-1,-1);
+            ObjectValue object=new ObjectValue(1,"HeapFixture",true,"object");Slot slot=new Content();
+            Site site=new Site(new MethodId("HeapFixture","read","()V"),20,1,"fixture");BranchKey branch=new BranchKey(0,0);
+            var selected=io.just.knowledge.Values.Path.EMPTY.with(branch,1).orElseThrow();
+            for(int i=1;i<=16;i++)heap.write(object,slot,new ExecutionPoint(0,i),Value.of(new Literal("before")),site);
+            heap.write(object,slot,new ExecutionPoint(0,17),Value.of(new Literal("after"),selected),site);
+            var use=new HeapStore.Use(new ExecutionPoint(0,20),site,io.just.knowledge.Values.Path.EMPTY,List.of(),false);
+            assertEquals(Set.of(new Literal("after")),heap.read(object,slot,use).value().alternatives().stream().map(Bound::atom).collect(java.util.stream.Collectors.toSet()));
+            conditions.uncertain(branch,new Gap(GapKind.CONTROL_CONDITION,site,"branch is unknown"));
+            assertEquals(Set.of(new Literal("before"),new Literal("after")),heap.read(object,slot,use).value().alternatives().stream().map(Bound::atom).collect(java.util.stream.Collectors.toSet()));
+
+            ObjectValue other=new ObjectValue(2,"HeapFixture",true,"other");for(int i=3;i<=18;i++)heap.write(other,slot,new ExecutionPoint(0,i),Value.of(new Literal("loop")),site);
+            List<Edge> cfg=new ArrayList<>();var loopUse=new HeapStore.Use(new ExecutionPoint(0,2),site,io.just.knowledge.Values.Path.EMPTY,cfg,false);
+            assertTrue(heap.read(other,slot,loopUse).value().empty());
+            cfg.add(new Edge(18,1,false));assertEquals(Value.of(new Literal("loop")),heap.read(other,slot,loopUse).value());
+
+            ObjectValue array=new ObjectValue(3,"[Ljava/lang/Object;",true,"array");
+            for(int i=0;i<16;i++)assertFalse(heap.write(array,new Index(i),new ExecutionPoint(0,1),Value.BOTTOM,site));
+            assertFalse(heap.read(array,new Elements(),use).dependencies().contains(new HeapStore.Cell(array.id(),new Index(16))));
+            assertFalse(heap.write(array,new Index(16),new ExecutionPoint(0,1),Value.BOTTOM,site));
+            assertTrue(heap.read(array,new Elements(),use).dependencies().contains(new HeapStore.Cell(array.id(),new Index(16))));
+        }
+    }
     @Test void sameContextOrderingRespectsIterationsEffectsAndRequestBoundaries()throws Exception {
         Path classes=io.just.BytecodeFixtures.compile(temp,8,Map.of("HeapFixture.java","public class HeapFixture {}"));
         try(Inputs inputs=Inputs.open(classes,List.of(),Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {

@@ -59,6 +59,17 @@ final class ClassLoading implements Model {
                 String binary=Values.type(descriptor);scope=program.scope(binary,scope);
                 List<Gap> gaps=program.type(binary,scope).isPresent() || descriptor.startsWith("[")?List.of():Mechanisms.queryGaps(call,program.definition(binary));
                 Local loaded=Local.of(new RequireNormal(gaps),new Result(Value.of(new ClassValue(descriptor,true,Optional.empty(),scope)).requiring(gaps)));
+                if(load && !descriptor.startsWith("[") && call.receiver() instanceof ObjectValue receiver && receiver.exact()) {
+                    MethodId requested=program.method(receiver.type(),"findClass","(Ljava/lang/String;)Ljava/lang/Class;",receiver.loader());
+                    Query<Method> finder=program.lookup(requested);
+                    if(finder.value().filter(method -> !method.id().owner().equals("java/lang/ClassLoader") && method.hasBody()).isPresent()) {
+                        List<Gap> fallback=new ArrayList<>(Mechanisms.queryGaps(call,finder));
+                        fallback.add(Mechanisms.gap(call,GapKind.DEPLOYMENT,"parent and previously loaded classes do not resolve the requested name before findClass"));
+                        Local child=Local.of(new Dispatch(finder.value().orElseThrow().id(),receiver,List.of(name),Kind.DYNAMIC_CALL,Evidence.CONDITIONAL,
+                                List.of(call.call().site()),List.copyOf(fallback),ReturnFlow.TO_RESULT,ExceptionFlow.DIRECT));
+                        return Optional.of(Local.of(new Alternative(0,loaded),new Alternative(1,child)));
+                    }
+                }
                 if(forName && call.arguments().size()==3 && !(call.arguments().get(1) instanceof Literal flag && (flag.value() instanceof Number || flag.value() instanceof Boolean))) {
                     for(int selected=0;selected<2;selected++) {
                         List<Effect> branch=new ArrayList<>();branch.add(new Need(new InputNeed(call.arguments().get(1),Optional.empty(),NeedKind.VALUE,"Z",List.of(new Literal(selected==1)),"Class.forName initialization flag")));

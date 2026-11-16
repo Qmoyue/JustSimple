@@ -26,6 +26,19 @@ class ArrayBindingsTest {
         assertTrue(result.frontier().stream().anyMatch(g -> g.kind()==GapKind.BUDGET && g.site().equals(site)));
         assertTrue(ValueBindings.array(array,(object,slot) -> slot instanceof Length?Value.of(new Literal(100)):Value.BOTTOM,Path.EMPTY,site).frontier().stream().anyMatch(g -> g.kind()==GapKind.BUDGET));
     }
+    @Test void arrayBindingFrontierFollowsTheSuppliedBudget() {
+        Site site=new Site(new MethodId("ArrayBoundary","run","()V"),3,1,"array consumer");
+        ObjectValue array=new ObjectValue(1,"[Ljava/lang/Object;",true,"array",false);
+        Value values=Value.of(new Literal("a")).merge(Value.of(new Literal("b"))).merge(Value.of(new Literal("c")));
+        for(int limit:List.of(2,4)) {
+            Bindings heap=new Bindings() {
+                @Override public Value read(ObjectValue object,Slot slot){return slot instanceof Length?Value.of(new Literal(1)):values;}
+                @Override public int alternatives(){return limit;}
+            };
+            var result=ValueBindings.array(array,heap,Path.EMPTY,site);
+            assertEquals(Math.min(limit,3),result.values().size());assertEquals(limit==2,!result.frontier().isEmpty());
+        }
+    }
     @Test void unboxingOverflowRetainsConvertedArgumentTuples() throws Exception {
         var classes=BytecodeFixtures.compile(temp,8,Map.of("PrimitiveTarget.java","public class PrimitiveTarget {public PrimitiveTarget(long left,long right){}}"));
         try(Inputs input=Inputs.open(classes,List.of(),java.nio.file.Path.of(System.getProperty("java.home")),Inputs.Limits.defaults())) {

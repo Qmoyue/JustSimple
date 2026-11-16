@@ -42,11 +42,11 @@ final class Constructors implements Model {
                 if(!ordered.pending().isEmpty())choices.add(new Observe(Kind.REFLECTION,"constructor relation frontier",List.of(call.call().site()),Mechanisms.queryGaps(call,ordered)));
                 int selection=0;
                 for(Method target:ordered.value().orElseThrow()) {
+                    if(selection>=bindings.alternatives()){choices.add(new Observe(Kind.REFLECTION,"constructor member frontier",List.of(call.call().site()),List.of(Mechanisms.gap(call,GapKind.BUDGET,"constructor target budget ("+bindings.alternatives()+")"))));break;}
                     List<Atom> signature=program.signature(target.id()).parameters().stream().map(p -> (Atom)new ClassValue(p.descriptor(),true,Optional.empty(),program.scope(Values.type(p.descriptor()),owner.loader()))).toList();
                     ArrayValue required=new ArrayValue(call.result().id(),ArrayRole.METHOD_TYPES,"[Ljava/lang/Class;",signature);
                     choices.add(new Alternative(selection++,Local.of(new Need(new InputNeed(call.arguments().get(0),Optional.empty(),NeedKind.METHOD_TYPES,"[Ljava/lang/Class;",List.of(required),"constructor signature required by "+target.id())),
                             Mechanisms.result(new ConstructorValue(call.result().id(),owner,required,declared,call.call().site())))));
-                    if(selection>=64){choices.add(new Observe(Kind.REFLECTION,"constructor member frontier",List.of(call.call().site()),List.of(Mechanisms.gap(call,GapKind.BUDGET,"constructor target budget (64)"))));break;}
                 }
                 if(!choices.isEmpty())return Optional.of(signatureArrays.keeping(new Local(choices)));
             }

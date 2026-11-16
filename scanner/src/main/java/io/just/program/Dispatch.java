@@ -32,14 +32,22 @@ public final class Dispatch {
     /** Only supplied receiver candidates are inspected. Native targets retain their metadata. */
     public Query<Result> within(MethodId requested, String upper, int loader,
                                 List<DefinedType> receivers, Budget budget) {
+        return within(requested,upper,loader,receivers,List.of(),budget);
+    }
+
+    /** Preferences order this scope without adding receivers to it. */
+    public Query<Result> within(MethodId requested, String upper, int loader,
+                                List<DefinedType> receivers,List<DefinedType> preferred,Budget budget) {
         List<DefinedType> scope = List.copyOf(new LinkedHashSet<>(receivers));
-        return resolve(new Member(requested, upper, loader), scope, List.of(), budget, Query.found(List.of()),
+        Set<DefinedType> allowed=new HashSet<>(scope);
+        List<DefinedType> ranked=preferred.stream().filter(allowed::contains).distinct().toList();
+        return resolve(new Member(requested, upper, loader), scope, ranked, budget, Query.found(List.of()),
                 method -> (method.access() & Opcodes.ACC_ABSTRACT) == 0);
     }
 
-    /** Scanner discovery retains its existing candidate order and body-backed target limit. */
+    /** Scanner discovery retains candidate order and limits body-backed targets per query. */
     Query<List<VirtualTarget>> discover(MethodId requested, String upper, int loader,
-                                        List<DefinedType> preferred) {
+                                        List<DefinedType> preferred,int targetLimit) {
         List<VirtualTarget> targets = new ArrayList<>();
         List<QueryIssue> issues = new ArrayList<>();
         Member member = new Member(requested, upper, loader);
@@ -58,7 +66,7 @@ public final class Dispatch {
         }
         if (base.value().isEmpty()) issues.addAll(base.pending());
         Query<Result> query = resolve(member, program.dispatchCandidates(upper, loader), preferred,
-                new Budget(Integer.MAX_VALUE, 64), new Query<>(Optional.of(targets), issues), Method::hasBody);
+                new Budget(Integer.MAX_VALUE, targetLimit), new Query<>(Optional.of(targets), issues), Method::hasBody);
         return new Query<>(query.value().map(Result::targets), query.pending());
     }
 
